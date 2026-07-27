@@ -1,0 +1,37 @@
+name: Verify
+
+# Every gate that can run without a browser or a network. The CDP browser suite and the optional
+# live-provider suites are deliberately excluded: the first needs a real Chrome and the second would
+# put CI traffic on donated public services on every push.
+on:
+  push:
+    branches: [main, release]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Types
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      # Last, because it is the slowest and a type or test failure is cheaper to read.
+      - name: Production build
+        run: npm run build

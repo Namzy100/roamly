@@ -1,26 +1,245 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/**
+ * Roamly design system.
+ *
+ * The palette is declared once here and mapped onto shadcn's semantic tokens,
+ * so the generated primitives in `components/ui` inherit the travel-journal
+ * look without being edited. Nothing outside this file should hard-code a
+ * colour value.
+ *
+ * Light only by design — the warm cream ground is the identity of the product,
+ * and a half-considered dark theme would undermine it. There is deliberately no
+ * `.dark` block, so no untested second theme ships.
+ */
 
 @theme inline {
+  /* Raw palette, exposed as utilities: bg-cream, text-forest, ring-terracotta */
+  --color-cream: var(--cream);
+  --color-cream-raised: var(--cream-raised);
+  --color-sand: var(--sand);
+  --color-forest: var(--forest);
+  --color-forest-soft: var(--forest-soft);
+  --color-terracotta: var(--terracotta);
+  --color-terracotta-soft: var(--terracotta-soft);
+  /*
+   * A darker terracotta, for small text sitting on a terracotta-tinted background.
+   *
+   * `--terracotta` is a *fill* colour: at L 0.615 it reads beautifully as an icon or a border, and it
+   * lands near 3.3:1 as 11px text on `bg-terracotta/10` — under the 4.5:1 that AA requires for body
+   * text. Rather than lighten the tint (which would weaken the signal) or enlarge the text, small text
+   * uses this darker value and the icon beside it keeps the original.
+   */
+  --color-terracotta-ink: var(--terracotta-ink);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-line: var(--line);
+
+  /* shadcn semantic tokens */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Typography: editorial serif for display, clean sans for everything else */
+  --font-sans: var(--font-body);
+  --font-heading: var(--font-display);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* Restrained elevation — two steps only, both warm rather than grey */
+  --shadow-card:
+    0 1px 2px oklch(0.32 0.048 156 / 0.05),
+    0 8px 24px -12px oklch(0.32 0.048 156 / 0.12);
+  --shadow-raised:
+    0 2px 4px oklch(0.32 0.048 156 / 0.06),
+    0 16px 40px -16px oklch(0.32 0.048 156 / 0.18);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  color-scheme: light;
+
+  --cream: oklch(0.968 0.014 84);
+  --cream-raised: oklch(0.991 0.007 84);
+  --sand: oklch(0.932 0.021 82);
+  --forest: oklch(0.325 0.048 156);
+  --forest-soft: oklch(0.45 0.052 156);
+  --terracotta: oklch(0.615 0.121 44);
+  --terracotta-soft: oklch(0.895 0.041 62);
+  --terracotta-ink: oklch(0.47 0.115 42);
+  --ink: oklch(0.245 0.013 62);
+  --ink-muted: oklch(0.512 0.015 62);
+  --line: oklch(0.886 0.016 80);
+
+  --background: var(--cream);
+  --foreground: var(--ink);
+  --card: var(--cream-raised);
+  --card-foreground: var(--ink);
+  --popover: var(--cream-raised);
+  --popover-foreground: var(--ink);
+  --primary: var(--forest);
+  --primary-foreground: oklch(0.978 0.011 84);
+  --secondary: var(--sand);
+  --secondary-foreground: var(--forest);
+  --muted: oklch(0.948 0.015 82);
+  --muted-foreground: var(--ink-muted);
+  --accent: var(--terracotta);
+  --accent-foreground: oklch(0.985 0.008 84);
+  --destructive: oklch(0.522 0.163 27);
+  --border: var(--line);
+  --input: var(--line);
+  --ring: var(--forest-soft);
+
+  --radius: 0.75rem;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display), ui-serif, Georgia, serif;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+  }
+
+  /**
+   * One consistent, high-contrast focus ring for every interactive element.
+   * Keyboard-only, so pointer users never see it.
+   */
+  :focus-visible {
+    outline: 2px solid var(--forest);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font-family: inherit;
+  }
+
+  input[type="date"] {
+    accent-color: var(--forest);
+  }
+
+  /**
+   * Nothing in the layout may cause a sideways scrollbar.
+   *
+   * `clip` rather than `hidden`: `overflow-x: hidden` turns the element into a
+   * scroll container, which silently breaks `position: sticky` for every
+   * descendant — the site header and the workspace map both stop pinning.
+   * `clip` prevents the overflow without creating that container.
+   */
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: clip;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+/**
+ * Warms the basemap toward the cream palette.
+ *
+ * Applied to the tile canvas only. Markers, controls and the attribution notice
+ * are DOM siblings of the canvas inside `.maplibregl-map`, so their colour and —
+ * critically — the legibility of the required OpenStreetMap credit are untouched.
+ * Kept deliberately mild: enough to stop the map reading as a grey rectangle
+ * pasted into a warm page, not enough to misrepresent the map data.
+ */
+.maplibregl-canvas {
+  filter: sepia(0.14) saturate(0.92) brightness(1.02);
+}
+
+/* The attribution must stay readable against the warmed tiles. */
+.maplibregl-ctrl-attrib {
+  background-color: color-mix(in oklch, var(--cream-raised) 88%, transparent);
+  font-size: 0.625rem;
+}
+
+.maplibregl-ctrl-attrib a {
+  color: var(--ink-muted);
+}
+
+/**
+ * Motion is restrained and opt-out. Framer Motion reads the same preference via
+ * `useReducedMotion`; this covers CSS transitions and anything added later that
+ * does not go through the motion layer.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Editorial small caps used for section eyebrows and metadata labels. */
+@utility eyebrow {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* Thin, warm scrollbar for the itinerary column. */
+@utility scrollbar-subtle {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+
+  &::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: var(--line);
+    border-radius: 9999px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
 }

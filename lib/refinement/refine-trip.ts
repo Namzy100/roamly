@@ -1,0 +1,1043 @@
+import "server-only";
+
+import type {
+  AiProviderPreference,
+  StructuredGenerationResult,
+  StructuredGenerator,
+} from "@/lib/ai";
+import { generateTripPlan, routingPolicyForPace } from "@/lib/generate";
+import { buildRoutingSummary, deriveExpectedLegs } from "@/lib/plan";
+import { createStructuredGenerator, resolveAiConfig } from "@/lib/providers/ai";
+import type {
+  ItineraryDay,
+  TripGenerationContext,
+  TripPlace,
+  TripPlan,
+} from "@/lib/schemas";
+import { STOPS_PER_DAY } from "@/lib/generate";
+
+import { applyDayAdjustment } from "./adjust-day";
+import {
+  deriveEligibleCandidates,
+  filterForReplacement,
+  placesInUse,
+} from "./candidates";
+import type { AiRefinementCommand } from "./commands";
+import { clearAllRoutes, rekeyDaySegments } from "./invalidate-routes";
+import {
+  ADJUST_DAY_SYSTEM_INSTRUCTION,
+  REPLACE_BACKUP_SYSTEM_INSTRUCTION,
+  REPLACE_ITEM_SYSTEM_INSTRUCTION,
+} from "./prompts";
+import {
+  applyBackupReplacement,
+  applyBackupUnavailable,
+} from "./replace-backup";
+import {
+  RefinementBuildError,
+  applyItemReplacement,
+  applyItemUnavailable,
+} from "./replace-item";
+import {
+  AdjustDayResultSchema,
+  REFINEMENT_SCHEMA_NAMES,
+  ReplaceBackupResultSchema,
+  ReplaceItemResultSchema,
+} from "./schemas";
+import { buildRefinementSummary, invalidatedLegIdsBetween } from "./summary";
+import type {
+  RefinementError,
+  RefinementProgressReporter,
+  RefinementWarning,
+  TripRefinementResult,
+} from "./types";
+import {
+  validateAdjustDayResult,
+  validateAdjustmentHonoured,
+  validatePreserved,
+  validateRefinedPlan,
+  validateReplaceBackupResult,
+  validateReplaceItemResult,
+} from "./validate";
+
+/**
+ * The refinement orchestrator.
+ *
+ * ## The shape every action follows
+ *
+ * ```
+ * locate the target ─► derive the eligible subset ─► one model call
+ *   ─► validate the output ─► build in memory ─► re-key routes
+ *   ─► validate the whole plan ─► return a candidate
+ * ```
+ *
+ * Nothing is persisted at any point, and the arms that are not `success`/`partial`
+ * carry no plan. So a failure at the last step leaves the traveller's saved trip
+ * exactly as it was — not restored, *untouched*. That is the rollback guarantee, and
+ * it is structural rather than something the error handling has to remember.
+ *
+ * ## One model call
+ *
+ * Per refinement, and no repair. The generation pipeline allows a repair because an
+ * itinerary has many ways to be slightly wrong and a second pass usually fixes them;
+ * a refinement asks for one place out of a supplied list, and a model that answers
+ * that wrongly is not going to be talked round. A rejected refinement is reported and
+ * the traveller can try again, which is cheaper than two calls on every edit.
+ *
+ * ## It never routes
+ *
+ * Not one provider call. A refinement *invalidates* routes — it drops results whose
+ * adjacency no longer exists — and leaves the recalculation to the traveller, through
+ * the routing route. That keeps this endpoint free of the routing budget and keeps
+ * "editing my trip" from silently costing twenty requests to a donated server.
+ */
+
+/** Refinements are small; this is well clear of the slowest realistic local model. */
+export const REFINEMENT_BUDGET_MS = 60_000;
+
+export type RefineTripInput = {
+  plan: TripPlan;
+  generation: TripGenerationContext;
+  command: AiRefinementCommand;
+  providerPreference?: AiProviderPreference;
+  revisionBefore: number;
+  signal?: AbortSignal;
+  onProgress?: RefinementProgressReporter;
+  now?: () => string;
+  generator?: StructuredGenerator;
+  budgetMs?: number;
+};
+
+export async function refineTrip(
+  input: RefineTripInput,
+): Promise<TripRefinementResult> {
+  const progress = input.onProgress ?? (() => {});
+  const now = input.now ?? (() => new Date().toISOString());
+
+  const selection = input.generator
+    ? ({ ok: true as const, generator: input.generator })
+    : resolveRefinementProvider(input.generation, input.providerPreference);
+
+  if (!selection.ok) return selection.result;
+  const generator = selection.generator;
+
+  const deadline = withDeadline(
+    input.signal,
+    input.budgetMs ?? REFINEMENT_BUDGET_MS,
+  );
+
+  try {
+    progress("reviewing");
+
+    switch (input.command.type) {
+      case "replace-item":
+        return await replaceItemAction({ ...input, generator, progress, now, deadline });
+      case "replace-backup":
+        return await replaceBackupAction({ ...input, generator, progress, now, deadline });
+      case "adjust-day":
+        return await adjustDayAction({ ...input, generator, progress, now, deadline });
+      case "regenerate-trip":
+        return await regenerateAction({ ...input, generator, progress, now, deadline });
+    }
+  } catch (error) {
+    return toFailure(error, deadline);
+  } finally {
+    deadline.dispose();
+  }
+}
+
+/**
+ * Which planner may refine this trip.
+ *
+ * The rule that keeps provenance honest:
+ *
+ *  - a trip generated by **Gemini or Ollama** needs a real model. With none
+ *    configured the action is unavailable and the traveller is told why — the demo
+ *    planner is *not* quietly substituted, because the result would be template
+ *    output inside a trip labelled as model-generated.
+ *  - a trip built by the **demo planner** may be refined by the demo planner. That
+ *    is the same planner doing the same job, and refusing would make the keyless
+ *    path a dead end: plan for free, then be unable to change it.
+ *
+ * A configured model may always refine a demo trip if the traveller prefers.
+ */
+export function resolveRefinementProvider(
+  generation: TripGenerationContext,
+  preference?: AiProviderPreference,
+):
+  | { ok: true; generator: StructuredGenerator }
+  | { ok: false; result: TripRefinementResult } {
+  const config = resolveAiConfig();
+  const selected = createStructuredGenerator({ preference, config });
+
+  if (selected.ok && selected.generator.id !== "deterministic") {
+    return { ok: true, generator: selected.generator };
+  }
+
+  if (generation.provider === "deterministic") {
+    // The demo planner refining its own trip.
+    const deterministic = createStructuredGenerator({
+      preference: "deterministic",
+      config,
+    });
+    if (deterministic.ok) return { ok: true, generator: deterministic.generator };
+  }
+
+  return {
+    ok: false,
+    result: {
+      status: "unavailable",
+      reason: "not_configured",
+      userMessage:
+        "This trip was generated with an AI planner, and none is configured here — so it cannot be refined. Recalculating routes still works, and a trip built with the demo planner can be refined without any configuration.",
+    },
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* replace-item                                                               */
+/* -------------------------------------------------------------------------- */
+
+type ActionContext = RefineTripInput & {
+  generator: StructuredGenerator;
+  progress: RefinementProgressReporter;
+  now: () => string;
+  deadline: { signal: AbortSignal; timedOut: boolean };
+};
+
+async function replaceItemAction(
+  context: ActionContext,
+): Promise<TripRefinementResult> {
+  if (context.command.type !== "replace-item") throw new Error("wrong action");
+  const command = context.command;
+
+  const day = context.plan.days.find(
+    (entry) => entry.dayNumber === command.dayNumber,
+  );
+  if (!day) return failed([dayNotFound(command.dayNumber)]);
+
+  const item = day.items.find((entry) => entry.id === command.itemId);
+  if (!item) {
+    return failed([
+      {
+        code: "item_not_found",
+        message: `Stop "${command.itemId}" is not on day ${command.dayNumber}.`,
+        dayNumber: command.dayNumber,
+        itemId: command.itemId,
+      },
+    ]);
+  }
+  if (item.status !== "confirmed" || item.place === null) {
+    return failed([
+      {
+        code: "item_not_replaceable",
+        message:
+          "Only a stop with a place can be replaced. An open slot has nothing to swap, and a free-time block is not a place.",
+        dayNumber: command.dayNumber,
+        itemId: command.itemId,
+      },
+    ]);
+  }
+
+  context.progress("finding-alternatives");
+
+  const eligible = deriveEligibleCandidates(
+    context.generation.placePool,
+    filterForReplacement({
+      pool: context.generation.placePool,
+      current: item.place,
+      // Everything already on the day, so a replacement is not a duplicate.
+      excludePlaceIds: [...placesInUse(context.plan, { day })],
+      preferences: command.preferences,
+    }),
+  );
+
+  if (eligible.places.length === 0) {
+    return failed([
+      {
+        code: "no_eligible_candidates",
+        message:
+          "The saved place search has no other place of this kind near this stop, so there is nothing to swap it for. Nothing was changed.",
+        dayNumber: command.dayNumber,
+        itemId: command.itemId,
+      },
+    ]);
+  }
+
+  const answer = await context.generator.generate({
+    operation: "refinement",
+    systemInstruction: REPLACE_ITEM_SYSTEM_INSTRUCTION,
+    input: {
+      action: "replace-item",
+      currency: context.plan.request.currency,
+      travelers: context.plan.request.travelers,
+      pace: context.plan.request.pace,
+      interests: context.plan.request.interests,
+      dietary: context.plan.request.dietary,
+      current: {
+        placeId: item.place.placeId,
+        category: item.place.category,
+        mealType: item.mealType,
+        startTime: item.startTime,
+        endTime: item.endTime,
+        estimatedCost: item.estimatedCost,
+        title: item.title,
+      },
+      day: describeDayForPrompt(day, command.itemId),
+      ...(command.preferences ? { preferences: command.preferences } : {}),
+      candidates: eligible.candidates,
+    },
+    outputSchema: ReplaceItemResultSchema,
+    schemaName: REFINEMENT_SCHEMA_NAMES.replaceItem,
+    signal: context.deadline.signal,
+  });
+
+  const read = readValue(answer);
+  if (read.status !== "ok") return read.result;
+
+  const validated = validateReplaceItemResult({
+    raw: read.value,
+    eligible: eligible.places,
+    currency: context.plan.request.currency,
+    ...(command.preferences?.cheaper === true
+      ? { cheaperThan: item.estimatedCost }
+      : {}),
+  });
+  if (!validated.ok) return failed(validated.errors);
+
+  context.progress("rebuilding");
+
+  // Bound to a local so the discriminant narrows; a property access on
+  // `validated.value` re-widens at each use.
+  const choice = validated.value;
+  const outcome =
+    choice.status === "selected"
+      ? applyItemReplacement({
+          plan: context.plan,
+          dayNumber: command.dayNumber,
+          itemId: command.itemId,
+          // Non-null by construction: validation proved membership of `eligible`.
+          chosen: eligible.places.find(
+            (place) => place.placeId === choice.placeId,
+          )!,
+          result: choice,
+        })
+      : applyItemUnavailable({
+          plan: context.plan,
+          dayNumber: command.dayNumber,
+          itemId: command.itemId,
+          reason: choice.reason,
+        });
+
+  return finish({
+    context,
+    action: "replace-item",
+    built: outcome.plan,
+    warnings: outcome.warnings,
+    affectedDays: [command.dayNumber],
+    rekeyDays: [command.dayNumber],
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* replace-backup                                                             */
+/* -------------------------------------------------------------------------- */
+
+async function replaceBackupAction(
+  context: ActionContext,
+): Promise<TripRefinementResult> {
+  if (context.command.type !== "replace-backup") throw new Error("wrong action");
+  const command = context.command;
+
+  const day = context.plan.days.find(
+    (entry) => entry.dayNumber === command.dayNumber,
+  );
+  if (!day) return failed([dayNotFound(command.dayNumber)]);
+
+  const backup = day.backups.find((entry) => entry.id === command.backupId);
+  if (!backup) {
+    return failed([
+      {
+        code: "backup_not_found",
+        message: `Backup "${command.backupId}" is not on day ${command.dayNumber}.`,
+        dayNumber: command.dayNumber,
+      },
+    ]);
+  }
+
+  context.progress("finding-alternatives");
+
+  const eligible = deriveEligibleCandidates(context.generation.placePool, {
+    categories: [backup.place.category],
+    excludePlaceIds: [...placesInUse(context.plan, { day })],
+    anchor: backup.place.coordinates,
+    radiusMeters: undefined,
+  });
+
+  if (eligible.places.length === 0) {
+    return failed([
+      {
+        code: "no_eligible_candidates",
+        message:
+          "The saved place search has no other place of this kind to offer as a backup. Nothing was changed.",
+        dayNumber: command.dayNumber,
+      },
+    ]);
+  }
+
+  const answer = await context.generator.generate({
+    operation: "refinement",
+    systemInstruction: REPLACE_BACKUP_SYSTEM_INSTRUCTION,
+    input: {
+      action: "replace-backup",
+      currency: context.plan.request.currency,
+      travelers: context.plan.request.travelers,
+      current: {
+        placeId: backup.place.placeId,
+        category: backup.place.category,
+        reason: backup.reason,
+      },
+      day: describeDayForPrompt(day, null),
+      candidates: eligible.candidates,
+    },
+    outputSchema: ReplaceBackupResultSchema,
+    schemaName: REFINEMENT_SCHEMA_NAMES.replaceBackup,
+    signal: context.deadline.signal,
+  });
+
+  const read = readValue(answer);
+  if (read.status !== "ok") return read.result;
+
+  const validated = validateReplaceBackupResult({
+    raw: read.value,
+    eligible: eligible.places,
+    currency: context.plan.request.currency,
+  });
+  if (!validated.ok) return failed(validated.errors);
+
+  context.progress("rebuilding");
+
+  const choice = validated.value;
+  const outcome =
+    choice.status === "selected"
+      ? applyBackupReplacement({
+          plan: context.plan,
+          dayNumber: command.dayNumber,
+          backupId: command.backupId,
+          chosen: eligible.places.find(
+            (place) => place.placeId === choice.placeId,
+          )!,
+          result: choice,
+        })
+      : applyBackupUnavailable({
+          plan: context.plan,
+          dayNumber: command.dayNumber,
+          backupId: command.backupId,
+          reason: choice.reason,
+        });
+
+  /**
+   * `rekeyDays: []` — a backup has no adjacency, so no leg changes and no route is
+   * touched. Re-keying anyway would be harmless but would suggest the two are
+   * connected, and they are not.
+   */
+  return finish({
+    context,
+    action: "replace-backup",
+    built: outcome.plan,
+    warnings: outcome.warnings,
+    affectedDays: [command.dayNumber],
+    rekeyDays: [],
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* adjust-day                                                                 */
+/* -------------------------------------------------------------------------- */
+
+async function adjustDayAction(
+  context: ActionContext,
+): Promise<TripRefinementResult> {
+  if (context.command.type !== "adjust-day") throw new Error("wrong action");
+  const command = context.command;
+
+  const day = context.plan.days.find(
+    (entry) => entry.dayNumber === command.dayNumber,
+  );
+  if (!day) return failed([dayNotFound(command.dayNumber)]);
+
+  context.progress("finding-alternatives");
+
+  const retained = day.items.flatMap((item) => (item.place ? [item.place] : []));
+  const retainedIds = new Set(retained.map((place) => place.placeId));
+  /**
+   * `includeBackups: false` — a backup is not a scheduled stop.
+   *
+   * Promoting one into the day is a perfectly good way to make it cheaper or fuller,
+   * and treating it as "already in use" would rule out the obvious answer.
+   */
+  const usedElsewhere = placesInUse(context.plan, {
+    trip: true,
+    includeBackups: false,
+  });
+
+  /**
+   * Everything in the pool that is not already committed elsewhere in the trip.
+   *
+   * No category filter: an adjustment may legitimately swap a museum for a park, and
+   * narrowing to today's categories would make "cheaper" nearly impossible — the
+   * cheaper option is usually a *different kind* of place.
+   */
+  const eligible = deriveEligibleCandidates(context.generation.placePool, {
+    excludePlaceIds: [...usedElsewhere].filter(
+      (placeId) => !retainedIds.has(placeId),
+    ),
+    limit: 40,
+  });
+
+  const stopCap = STOPS_PER_DAY[context.plan.request.pace].max;
+
+  const answer = await context.generator.generate({
+    operation: "refinement",
+    systemInstruction: ADJUST_DAY_SYSTEM_INSTRUCTION,
+    input: {
+      action: "adjust-day",
+      adjustment: command.adjustment,
+      dayNumber: command.dayNumber,
+      currency: context.plan.request.currency,
+      travelers: context.plan.request.travelers,
+      pace: context.plan.request.pace,
+      stopCap,
+      currentDayTotal: day.dayTotal,
+      items: day.items.map(toPromptItem),
+      backups: day.backups.map((backup) => ({
+        backupId: backup.id,
+        placeId: backup.place.placeId,
+      })),
+      candidates: eligible.candidates,
+    },
+    outputSchema: AdjustDayResultSchema,
+    schemaName: REFINEMENT_SCHEMA_NAMES.adjustDay,
+    signal: context.deadline.signal,
+  });
+
+  const read = readValue(answer);
+  if (read.status !== "ok") return read.result;
+
+  const itemIdsElsewhere = new Set(
+    context.plan.days
+      .filter((entry) => entry.dayNumber !== command.dayNumber)
+      .flatMap((entry) => entry.items.map((item) => item.id)),
+  );
+
+  const validated = validateAdjustDayResult({
+    raw: read.value,
+    dayNumber: command.dayNumber,
+    eligible: eligible.places,
+    retained,
+    currency: context.plan.request.currency,
+    itemIdsElsewhere,
+  });
+  if (!validated.ok) return failed(validated.errors);
+
+  if (validated.value.status === "unavailable") {
+    // Nothing was changed, and the reason is the traveller's to read.
+    return {
+      status: "failed",
+      errors: [
+        {
+          code: "no_eligible_candidates",
+          message: validated.value.reason,
+          dayNumber: command.dayNumber,
+        },
+      ],
+      userMessage: validated.value.reason,
+    };
+  }
+
+  context.progress("rebuilding");
+
+  const canonicalByPlaceId = new Map<string, TripPlace>(
+    [...eligible.places, ...retained].map((place) => [place.placeId, place]),
+  );
+
+  const outcome = applyDayAdjustment({
+    plan: context.plan,
+    dayNumber: command.dayNumber,
+    result: validated.value,
+    canonicalByPlaceId,
+  });
+
+  /**
+   * The action's own promise, checked against the day it replaced. A "cheaper" day
+   * that cost more is a failure even if every other invariant holds.
+   */
+  const honoured = validateAdjustmentHonoured({
+    adjustment: command.adjustment,
+    before: outcome.previousDay,
+    after: outcome.day,
+    pace: context.plan.request.pace,
+    stopCap,
+  });
+  if (honoured.length > 0) return failed(honoured);
+
+  return finish({
+    context,
+    action: "adjust-day",
+    built: outcome.plan,
+    warnings: outcome.warnings,
+    affectedDays: [command.dayNumber],
+    rekeyDays: [command.dayNumber],
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/* regenerate-trip                                                            */
+/* -------------------------------------------------------------------------- */
+
+async function regenerateAction(
+  context: ActionContext,
+): Promise<TripRefinementResult> {
+  if (context.command.type !== "regenerate-trip") throw new Error("wrong action");
+  const command = context.command;
+
+  context.progress("rebuilding");
+
+  /**
+   * The generation pipeline, with discovery skipped.
+   *
+   * `existingPool` is what makes this **pool-stable**: the same strategy and assembly
+   * calls run, against the exact saved search result set, with no Overpass request
+   * and therefore no possibility of a place appearing that was not there before.
+   * Geocoding is likewise not re-run — the destination is the saved one.
+   */
+  const generated = await generateTripPlan({
+    tripId: context.plan.id,
+    request: context.plan.request,
+    selectedDestination: context.generation.destination,
+    generator: context.generator,
+    signal: context.deadline.signal,
+    now: context.now,
+    createdAt: context.plan.createdAt,
+    existingPool: {
+      pool: context.generation.placePool,
+      summary: context.generation.discoverySummary,
+    },
+    ...(command.preserve ? { preserve: command.preserve } : {}),
+    budgetMs: context.budgetMs ?? REFINEMENT_BUDGET_MS,
+  });
+
+  if (generated.status === "refused") {
+    return { status: "refused", userMessage: generated.userMessage };
+  }
+  if (generated.status === "unavailable") {
+    return {
+      status: "unavailable",
+      reason: generated.reason,
+      userMessage: generated.userMessage,
+    };
+  }
+  if (generated.status === "failed") {
+    return {
+      status: "failed",
+      errors: generated.violations.map((violation) => ({
+        code: "plan_invalid" as const,
+        message: violation.message,
+      })),
+      userMessage: generated.userMessage,
+    };
+  }
+
+  context.progress("checking");
+
+  const preserveErrors = validatePreserved({
+    plan: generated.plan,
+    preserve: command.preserve,
+  });
+  if (preserveErrors.length > 0) return failed(preserveErrors);
+
+  /**
+   * Every route cleared, and `plan.routing` with it.
+   *
+   * A regenerated itinerary shares only its dates with the old one. Even where a leg
+   * id coincidentally survives, keeping its geometry inside a plan the traveller was
+   * told had been rebuilt would be misleading — so regeneration clears rather than
+   * re-keys, and says so in the summary.
+   */
+  const cleared = clearAllRoutes(generated.plan);
+
+  const errors = validateRefinedPlan({
+    plan: cleared.plan,
+    pool: context.generation.placePool,
+  });
+  if (errors.length > 0) return failed(errors);
+
+  const summary = buildRefinementSummary({
+    action: "regenerate-trip",
+    before: context.plan,
+    after: cleared.plan,
+    /**
+     * Compared against the plan being replaced, not against the freshly generated one.
+     *
+     * A regenerated plan never held the old segments, so `clearAllRoutes` has nothing
+     * to report — every route the traveller had was on the *previous* plan, and that is
+     * what they need told about.
+     */
+    invalidatedLegIds: invalidatedLegIdsBetween(context.plan, cleared.plan),
+    revisionBefore: context.revisionBefore,
+    affectedDays: cleared.plan.days.map((day) => day.dayNumber),
+  });
+
+  const generationContext = withRefinementProvenance({
+    generation: generated.generation,
+    generator: context.generator,
+    action: "regenerate-trip",
+    at: context.now(),
+  });
+
+  const warnings: RefinementWarning[] = generated.warnings.map((warning) => ({
+    code: warning.code,
+    message: warning.message,
+    ...(warning.dayNumber !== undefined ? { dayNumber: warning.dayNumber } : {}),
+  }));
+
+  context.progress("finalising");
+
+  return warnings.length === 0
+    ? { status: "success", plan: cleared.plan, generationContext, summary, warnings: [] }
+    : { status: "partial", plan: cleared.plan, generationContext, summary, warnings };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Shared tail                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Re-key routes, validate the whole plan, summarise.
+ *
+ * The last thing every targeted action does, so the invariants cannot be enforced
+ * differently in three places.
+ */
+function finish(input: {
+  context: ActionContext;
+  action: AiRefinementCommand["type"];
+  built: TripPlan;
+  warnings: RefinementWarning[];
+  affectedDays: number[];
+  rekeyDays: number[];
+}): TripRefinementResult {
+  const { context } = input;
+  const policy =
+    context.generation.routingPolicy ??
+    routingPolicyForPace(context.plan.request.pace);
+
+  let plan = input.built;
+
+  for (const dayNumber of input.rekeyDays) {
+    const day = plan.days.find((entry) => entry.dayNumber === dayNumber);
+    if (!day) continue;
+    const rekeyed = rekeyDaySegments({ day, plan, policy });
+    plan = {
+      ...plan,
+      days: plan.days.map((entry) =>
+        entry.dayNumber === dayNumber ? rekeyed.day : entry,
+      ),
+    };
+  }
+
+  /**
+   * `totalTravelMinutes` follows the segments, which have just changed. Re-keying
+   * returns the day with new segments but the stored total belongs to the old set,
+   * so it is recomputed here — and `validateRefinedPlan` checks the result, which is
+   * what would catch this being forgotten.
+   */
+  plan = recomputeTravelTotals(plan);
+
+  /**
+   * The coverage summary describes a routing run against an itinerary that has
+   * changed. Rather than leave a stale one, it is rebuilt from the plan as it now
+   * stands, so "6 of 9 legs" counts the legs that actually exist.
+   */
+  plan = refreshRoutingSummary(plan, policy);
+
+  context.progress("checking");
+
+  const errors = validateRefinedPlan({
+    plan,
+    pool: context.generation.placePool,
+    affectedDays: input.affectedDays,
+  });
+  if (errors.length > 0) return failed(errors);
+
+  const summary = buildRefinementSummary({
+    action: input.action,
+    before: context.plan,
+    after: plan,
+    /**
+     * Measured by comparing the two plans rather than accumulated as we go.
+     *
+     * An applier clears a replaced stop's own segment *before* re-keying could notice
+     * it, so counting during the work under-reports. Comparing cannot.
+     */
+    invalidatedLegIds: invalidatedLegIdsBetween(context.plan, plan),
+    revisionBefore: context.revisionBefore,
+    affectedDays: input.affectedDays,
+  });
+
+  const generationContext = withRefinementProvenance({
+    generation: context.generation,
+    generator: context.generator,
+    action: input.action,
+    at: context.now(),
+  });
+
+  context.progress("finalising");
+
+  return input.warnings.length === 0
+    ? { status: "success", plan, generationContext, summary, warnings: [] }
+    : {
+        status: "partial",
+        plan,
+        generationContext,
+        summary,
+        warnings: input.warnings,
+      };
+}
+
+function recomputeTravelTotals(plan: TripPlan): TripPlan {
+  return {
+    ...plan,
+    days: plan.days.map((day) => {
+      const minutes = day.items.reduce((total, item) => {
+        const segment = item.travelToNext;
+        if (!segment) return total;
+        if (segment.status === "routed") return total + segment.durationMinutes;
+        if (segment.status === "estimated") {
+          return total + segment.estimatedDurationMinutes;
+        }
+        return total;
+      }, 0);
+
+      return day.totalTravelMinutes === minutes
+        ? day
+        : { ...day, totalTravelMinutes: minutes };
+    }),
+  };
+}
+
+/** The coverage summary, rebuilt — or dropped when nothing is routed any more. */
+function refreshRoutingSummary(
+  plan: TripPlan,
+  policy: NonNullable<TripPlan["routing"]>["policy"],
+): TripPlan {
+  if (plan.routing === null) return plan;
+
+  const hasAnySegment = plan.days.some((day) =>
+    day.items.some((item) => item.travelToNext !== null),
+  );
+  // Nothing left to describe. A summary of zero legs beside a plan with no segments
+  // is noise; `null` is the honest "no run applies to this itinerary".
+  if (!hasAnySegment) return { ...plan, routing: null };
+
+  return {
+    ...plan,
+    routing: {
+      ...plan.routing,
+      policy,
+      summary: buildRoutingSummary(plan, deriveExpectedLegs(plan, policy)),
+    },
+  };
+}
+
+/**
+ * Refinement provenance, bounded and additive.
+ *
+ * Kept in the generation context rather than on `TripPlan` for the same reason the
+ * rest of it is: which planner touched a trip is a fact about a run. Only the
+ * *latest* refinement is recorded — a full history would grow without limit inside
+ * `localStorage`, and the one-level undo snapshot already covers "what did this
+ * change".
+ *
+ * A deterministic refinement is not recorded as an AI one; there is nothing to
+ * attribute.
+ */
+export function withRefinementProvenance(input: {
+  generation: TripGenerationContext;
+  generator: StructuredGenerator;
+  action: AiRefinementCommand["type"];
+  at: string;
+}): TripGenerationContext {
+  if (input.generator.id === "deterministic") {
+    return input.generation;
+  }
+
+  return {
+    ...input.generation,
+    latestRefinement: {
+      provider: input.generator.id,
+      model: input.generator.model,
+      action: input.action,
+      refinedAt: input.at,
+    },
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+
+function describeDayForPrompt(day: ItineraryDay, focusItemId: string | null) {
+  return {
+    dayNumber: day.dayNumber,
+    theme: day.theme,
+    items: day.items.map((item) => ({
+      itemId: item.id,
+      isTheStopBeingReplaced: item.id === focusItemId,
+      startTime: item.startTime,
+      endTime: item.endTime,
+      mealType: item.mealType,
+      status: item.status,
+      ...(item.place ? { placeId: item.place.placeId } : {}),
+    })),
+  };
+}
+
+function toPromptItem(item: ItineraryDay["items"][number]) {
+  const base = {
+    itemId: item.id,
+    mealType: item.mealType,
+    startTime: item.startTime,
+    endTime: item.endTime,
+    title: item.title,
+    description: item.rationale,
+    estimatedCost: item.estimatedCost,
+  };
+
+  if (item.status === "unavailable") {
+    return { ...base, kind: "unavailable" as const };
+  }
+  if (item.place) {
+    return {
+      ...base,
+      kind: "place" as const,
+      placeId: item.place.placeId,
+      category: item.place.category,
+      reservationRecommended: item.bookingRequired,
+    };
+  }
+  return {
+    ...base,
+    kind: "non-place" as const,
+    nonPlaceCategory:
+      item.kind === "transport"
+        ? ("transport" as const)
+        : item.kind === "logistics"
+          ? ("accommodation" as const)
+          : ("free-time" as const),
+  };
+}
+
+function readValue(
+  result: StructuredGenerationResult<unknown>,
+):
+  | { status: "ok"; value: unknown }
+  | { status: "stop"; result: TripRefinementResult } {
+  switch (result.status) {
+    case "success":
+      return { status: "ok", value: result.value };
+    case "refused":
+      return {
+        status: "stop",
+        result: { status: "refused", userMessage: result.userMessage },
+      };
+    case "unavailable":
+      return {
+        status: "stop",
+        result: {
+          status: "unavailable",
+          reason: result.reason,
+          userMessage: result.userMessage,
+        },
+      };
+  }
+}
+
+function dayNotFound(dayNumber: number): RefinementError {
+  return {
+    code: "day_not_found",
+    message: `Day ${dayNumber} is not part of this trip.`,
+    dayNumber,
+  };
+}
+
+function failed(errors: RefinementError[]): TripRefinementResult {
+  console.error(
+    "[roamly] refinement rejected",
+    JSON.stringify(errors.slice(0, 8)),
+  );
+  return {
+    status: "failed",
+    errors,
+    userMessage:
+      errors[0]?.code === "no_eligible_candidates"
+        ? errors[0].message
+        : "That change did not pass verification, so your trip was left exactly as it was. Please try again.",
+  };
+}
+
+function toFailure(
+  error: unknown,
+  deadline: { timedOut: boolean },
+): TripRefinementResult {
+  if (deadline.timedOut) {
+    return {
+      status: "unavailable",
+      reason: "timeout",
+      userMessage:
+        "That change took longer than the time available, so your trip was left unchanged. Please try again.",
+    };
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return {
+      status: "unavailable",
+      reason: "aborted",
+      userMessage: "The change was cancelled, so your trip is unchanged.",
+    };
+  }
+  if (error instanceof RefinementBuildError) {
+    return failed(error.errors);
+  }
+
+  console.error("[roamly] refinement failed unexpectedly", error);
+  return {
+    status: "unavailable",
+    reason: "unknown",
+    userMessage:
+      "Something went wrong making that change, so your trip was left unchanged. Please try again.",
+  };
+}
+
+/** One signal for the whole refinement. Same shape as generation's. */
+function withDeadline(
+  callerSignal: AbortSignal | undefined,
+  budgetMs: number,
+): { signal: AbortSignal; timedOut: boolean; dispose: () => void } {
+  const controller = new AbortController();
+  const state = {
+    signal: controller.signal,
+    timedOut: false,
+    dispose: () => {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+
+  const timer = setTimeout(() => {
+    state.timedOut = true;
+    controller.abort(new DOMException("Refinement budget exhausted", "TimeoutError"));
+  }, budgetMs);
+
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) onCallerAbort();
+  else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+
+  return state;
+}

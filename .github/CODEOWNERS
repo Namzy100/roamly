@@ -1,0 +1,11 @@
+# A single-maintainer portfolio project: everything routes to one reviewer.
+#
+# Listed explicitly rather than left implicit so that GitHub requests review automatically, and so a
+# future second maintainer has an obvious place to be added.
+*                       @namzysclone
+
+# The files where a careless change is hardest to notice and most expensive to get wrong.
+/lib/schemas/           @namzysclone
+/lib/structural-edits/  @namzysclone
+/lib/store/             @namzysclone
+/docs/ARCHITECTURE.md   @namzysclone

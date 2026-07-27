@@ -1,0 +1,4 @@
+2026-07-27-16:31 | Phase 7 release verification | 1dbd778 | 1592 unit / 188 browser / 28 smoke | harness 35-39 | agentshield A 99
+2026-07-27-20:06 | Phase 8 checkpoint 1 — editable command model (domain layer) | 1dbd778 | 1681 unit / 82 files / 188 browser | tsc+lint+build clean
+2026-07-27-21:52 | Phase 8 checkpoint 2A — itinerary card interaction boundary | 1dbd778 | 1701 unit / 84 files / 200 browser | tsc+lint+build clean | screenshots regenerated
+2026-07-27-23:05 | Phase 8 checkpoint 2B — explicit editing controls on one dispatcher-backed path | 1dbd778 | 1725 unit / 86 files / 220 browser | tsc+lint+build clean

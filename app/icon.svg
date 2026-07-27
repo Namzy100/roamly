@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32">
+  <!--
+    The favicon, from the same glyph the header wordmark uses.
+
+    SVG rather than a generated .ico: it is the maintainable source, every browser this app supports
+    reads it, and Next serves it through the `icon` file convention with the right headers. The forest
+    square and cream compass are the palette's own values, so a theme change is a two-attribute edit.
+  -->
+  <rect width="24" height="24" rx="5" fill="#1F3D33"/>
+  <path d="M12 4 14 10 20 12l-6 2L12 20l-2-6L4 12l6-2z" fill="#FBF7F0"/>
+</svg>
