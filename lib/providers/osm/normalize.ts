@@ -196,6 +196,27 @@ export function normalizeOverpassElement(
   const takeaway = parseOsmBoolean(tags.takeaway);
   if (takeaway !== undefined) place.takeaway = takeaway;
 
+  /**
+   * The two tags that let a landmark be joined to Wikidata and Commons.
+   *
+   * Copied verbatim like every other optional field, and for the same reason: they are OSM's own tags under OSM's own
+   * licence, so capturing them adds no source and no obligation beyond the ODbL attribution already carried.
+   *
+   * The QID is **format-checked here rather than trusted**, because it is the one captured tag that later becomes part
+   * of a request URL. `wikidata=Jerónimos` is a real kind of mapping error, and the place to refuse it is before it is
+   * stored — a stored malformed id would be retried on every enrichment pass forever. Dropping just the tag rather
+   * than rejecting the place is deliberate: the café is still a perfectly good café.
+   *
+   * The Wikipedia title is not validated beyond being non-empty and bounded. Its `lang:Title` convention is widely but
+   * not universally followed, and a value this module could not parse is still one a human could — so the matcher
+   * decides what it can use, and an unusable form means no enrichment rather than a discarded place.
+   */
+  const wikidata = tags.wikidata?.trim();
+  if (wikidata && /^Q[1-9]\d*$/.test(wikidata)) place.wikidataId = wikidata;
+
+  const wikipedia = tags.wikipedia?.trim();
+  if (wikipedia && wikipedia.length <= 300) place.wikipediaTitle = wikipedia;
+
   // Final gate: the schema is the authority on what a valid place is.
   const parsed = TripPlaceSchema.safeParse(place);
   return parsed.success ? parsed.data : null;

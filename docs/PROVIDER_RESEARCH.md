@@ -402,3 +402,126 @@ normalize, cache, persist, display, combine and export" is:
 
 `lib/place-intelligence/` encodes this table rather than describing it, so a provider added later cannot
 quietly widen it.
+
+---
+
+# Checkpoint 5B — Wikidata and Wikimedia Commons, endpoint-level
+
+**Researched:** 2026-07-28, Wikimedia Foundation and MediaWiki documentation only.
+**Status:** research gate for landmark enrichment. Implementation may not exceed what is resolved below.
+
+## Endpoints selected
+
+| Purpose | Endpoint | Why this one |
+| --- | --- | --- |
+| Fetch a **known** Wikidata entity | `https://www.wikidata.org/wiki/Special:EntityData/{QID}.json` | The Linked Data interface is the *documented recommendation* for a known entity — "typically faster response times than Action API" — and its URLs are cache-friendly. |
+| Fetch **several** known entities | `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q1\|Q2` | Up to **50 entities per request**. Batching with `\|` is what etiquette asks for instead of parallel calls. |
+| Resolve an OSM `wikipedia` tag to a QID | `https://{lang}.wikipedia.org/w/api.php?action=query&prop=pageprops&ppprop=wikibase_item&titles=…` | Resolves a title through the official API rather than by string-munging a QID out of it. |
+| Geographic candidate search | `https://query.wikidata.org/sparql` (`wikibase:around`) | The only documented way to ask "which entities are near this point". Used **only** when no QID or Wikipedia tag exists. |
+| File licence, credit and thumbnail | `https://commons.wikimedia.org/w/api.php?action=query&prop=imageinfo&iiprop=url\|extmetadata\|size&iiurlwidth={w}` | `extmetadata` is the documented source of `LicenseShortName`, `License`, `UsageTerms`, `Artist`, `Credit`, `AttributionRequired`, `LicenseUrl`. `iiurlwidth` returns a scaled URL. |
+
+- <https://www.wikidata.org/wiki/Wikidata:Data_access> (read 2026-07-28)
+- <https://www.mediawiki.org/wiki/API:Imageinfo> (read 2026-07-28)
+- <https://www.mediawiki.org/wiki/API:Etiquette> (read 2026-07-28)
+- <https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy> (read 2026-07-28)
+- <https://commons.wikimedia.org/wiki/Commons:Reusing_content_outside_Wikimedia> (read 2026-07-28)
+
+## Authentication
+
+**None. No credential of any kind.** Every endpoint above is anonymous and public, which is why this is the
+enrichment that can ship while Foursquare stays blocked — there is no key to configure, so keyless operation is
+not a fallback, it is the only mode.
+
+## User-Agent — a hard requirement, not etiquette
+
+The strongest single finding. Since 2010 Wikimedia **requires** a descriptive `User-Agent` on every request,
+including `api.php`. Requests without one receive **HTTP 403** with "Scripts should use an informative
+User-Agent string", and clients may be blocked without notice.
+
+The header must carry a tool name, a version and contact information, in the documented shape
+`Roamly/0.1 (https://github.com/roamly-demo)`.
+
+Two prohibitions are explicit: **do not** copy a browser User-Agent (it "appears malicious"), and **do not**
+send a generic default such as `curl` or `Python-urllib`. Roamly already has `ROAMLY_CONTACT_URL` in
+`lib/providers/osm/config.ts` for exactly this purpose on Nominatim and Overpass; the same value serves here.
+
+This is a blocking implementation requirement: a Wikimedia client that omits it does not degrade, it 403s.
+
+## Etiquette and rate limits
+
+| Rule | Requirement |
+| --- | --- |
+| Concurrency | **Serial, not parallel.** "Waiting for one request to finish before sending a new request should result in a safe request rate." |
+| Batching | Combine with `\|` (`titles=A\|B\|C`) rather than issuing one request each |
+| Method | Prefer `GET` for reads; request JSON; enable `Accept-Encoding: gzip` |
+| Backoff | On `ratelimited` or HTTP 429, back off exponentially and honour `Retry-After` |
+| `maxlag` | Use for non-interactive tasks |
+| Caching | **Explicitly encouraged** — "cache retrievable data locally" |
+| Numeric read limit | **Unresolved.** No number is published for the read path or for WDQS. |
+
+The unresolved numeric limit is the one that shapes the design: with no published budget, the only defensible
+implementation is the conservative one the etiquette describes — serial requests, batched where possible, a hard
+per-trip cap, and backoff. A concurrency figure cannot be justified by documentation, so none is assumed.
+
+## Attribution and image licences
+
+Commons licences are **per file** and there is "no single mandatory checklist" — requirements come from each
+file's own licence. What a reuser must be able to produce:
+
+- the **creator**, credited as the licence requires (not the uploader)
+- the **licence, identified** by name
+- a **link to the licence text**, or a copy of it
+- a link back to the **file description page**, so a reader can verify
+
+That maps exactly onto the fields `lib/place-intelligence/media.ts` already requires, and onto
+`provenanceIsComplete` refusing an `unknown` licence. No change to the sidecar contract is needed — the useful
+result of having built the contract before the provider.
+
+### Thumbnails versus originals — a decision with a recorded caveat
+
+**Thumbnails, via `iiurlwidth`.** Original Commons files are routinely tens of megabytes and are not what a card
+should load.
+
+The caveat, stated plainly: Commons says hotlinking a Commons URL is "possible, but is **not recommended**", and
+recommends downloading or `InstantCommons` instead. Not recommended is **not prohibited** — a resolved permission
+with a discouraged path, not an unresolved one. Roamly takes the discouraged path deliberately:
+
+- it has no server-side image store, and building one is outside this checkpoint
+- a proxy would route Wikimedia's bandwidth through our own without reducing Wikimedia's
+- the `upload.wikimedia.org/.../thumb/…` URL is the one Wikimedia itself serves to browsers
+
+If image volume ever becomes material the answer is local copies, which the licence permits and which
+`mayCopyMediaBytes` already gates on Commons plus complete provenance.
+
+**No transformation.** Roamly resizes, crops and re-encodes nothing: the scaled file is generated by Wikimedia,
+not by us, so no derivative is created and CC BY-SA's ShareAlike obligation is not triggered.
+`mediaMayBeTransformed` stays false unless a file says otherwise.
+
+## Persistence, export and commercial use
+
+Unchanged from the Checkpoint 5A matrix, now confirmed at endpoint level:
+
+| Source | Licence | Persist | Export | Commercial |
+| --- | --- | --- | --- | --- |
+| Wikidata structured data | CC0 | **Yes** | **Yes** | Unrestricted, no attribution required |
+| Commons media | Per file | **Yes, with creator + licence + licence URL** | Yes, with that provenance | CC BY-SA permits it with attribution; ShareAlike binds derivatives, and Roamly creates none |
+
+Neither is limited to non-commercial use, which is what separates them from Open-Meteo and why they are the
+enrichment that can outlive the prototype.
+
+## Unresolved — and therefore not implemented
+
+Per this checkpoint's own rule, each of these bounds a behaviour rather than being worked around:
+
+1. **No published numeric rate limit** for the Action API read path or WDQS. → Serial requests, a hard per-trip
+   cap, exponential backoff. No concurrency, no requests-per-second budget.
+2. **WDQS query timeout not confirmed** in the pages retrieved (60 s is widely cited; not documented in the
+   official pages read). → SPARQL is used only for the narrow `wikibase:around` candidate search, with a
+   client-side timeout of our own, and a failure is an absent enrichment rather than an error.
+3. **`AttributionRequired` reliability per file is unresolved.** → Its *absence* is treated as "attribution
+   required", never as "not required".
+4. **`LicenseShortName` is free text** and `extmetadata` is HTML-formatted. → Only an explicit allow-list of
+   recognised licence strings maps to a `LicenceId`; anything unrecognised becomes `unknown`, which
+   `mediaIsDisplayable` already refuses. No fuzzy licence inference.
+5. **Whether a Wikidata entity may legitimately describe two canonical places** has no documentary answer. → An
+   entity already attached elsewhere goes to review, never to an automatic second attachment.

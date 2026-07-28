@@ -147,6 +147,38 @@ export {
   type DisplaySurface,
 } from "./display-policy";
 
+/**
+ * Landmark enrichment scope and identity (Checkpoint 5B, sections 2 and 3).
+ *
+ * Both pure. Eligibility decides *whether Roamly may ask* about a place; the identity module decides *what it may ask*
+ * and *whether an answer may be attached*. Neither fetches, which is what makes "no provider call on the landing page"
+ * a property of the code rather than a rule somebody has to remember.
+ */
+export {
+  isLandmarkEligible,
+  landmarkEligibility,
+  selectLandmarkCandidates,
+  MAX_LANDMARK_CANDIDATES_PER_TRIP,
+  type EligibilityRefusalCode,
+  type LandmarkCandidate,
+  type LandmarkEligibility,
+} from "./landmark-eligibility";
+
+export {
+  evaluateWikidataCandidate,
+  isValidQid,
+  looksLikeBranch,
+  parseWikipediaTag,
+  planWikidataLookup,
+  toleranceMetersFor,
+  LANDMARK_AREA_TOLERANCE_METERS,
+  LANDMARK_POINT_TOLERANCE_METERS,
+  type WikidataCandidate,
+  type WikidataLookupPlan,
+  type WikidataMatchOutcome,
+  type WikipediaReference,
+} from "./wikidata-identity";
+
 export {
   intelligenceIsValid,
   validateIntelligence,

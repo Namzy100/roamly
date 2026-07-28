@@ -177,6 +177,42 @@ export const TripPlaceSchema = z.object({
   takeaway: z.boolean().optional(),
 
   /**
+   * OpenStreetMap's own `wikidata` tag, verbatim — a QID like `Q182147`.
+   *
+   * ## Why this belongs on the canonical record and enrichment does not
+   *
+   * It is an **OSM tag**, carried under the same ODbL licence as `name` and `openingHours`, contributed by the
+   * same mappers and fetched in the same request. Nothing external is consulted to obtain it. That makes it a
+   * fact about the place as OSM describes it, which is what `TripPlace` is for.
+   *
+   * External *facts* stay in the `lib/place-intelligence` sidecar. This is the licence-clean **join key** that
+   * lets the sidecar find them — and having it here is what turns Wikidata matching from a geographic guess into
+   * two independent sources naming one entity.
+   *
+   * `.optional()`, so every place and every exported file written before this parses unchanged and
+   * `TRIP_PLAN_SCHEMA_VERSION` stays where it is. Absent is the common case: most OSM records carry no `wikidata`
+   * tag, and absence is a fact about OSM's coverage rather than a gap to fill.
+   *
+   * Format-validated rather than trusted: a QID is `Q` followed by a positive integer, and a tag that is not one
+   * is a mapping error we must not carry into a request URL.
+   */
+  wikidataId: z
+    .string()
+    .regex(/^Q[1-9]\d*$/, "Not a Wikidata QID")
+    .optional(),
+  /**
+   * OpenStreetMap's own `wikipedia` tag, verbatim — `lang:Title`, as in `pt:Mosteiro dos Jerónimos`.
+   *
+   * Kept unparsed for the reason `openingHours` is: this is the provider's fact, and splitting it here would bake
+   * in one interpretation of a tag whose real-world values are messier than the convention suggests. The matcher
+   * parses it at read time and refuses what it cannot read.
+   *
+   * A title is **not** an identifier. It must be resolved to a QID through the official API before anything is
+   * attached to it — a page can be renamed, and two languages disagree about what a place is called.
+   */
+  wikipediaTitle: z.string().min(1).max(300).optional(),
+
+  /**
    * Present only for the mock sample data, which predates the free-provider
    * decision. OpenStreetMap supplies none of these, and nothing may synthesise
    * them — see the header note.
