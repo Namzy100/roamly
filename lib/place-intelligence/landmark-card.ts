@@ -7,7 +7,9 @@ import {
   mayDisplayMedia,
   requiredAttributions,
   selectDescription,
+  staleLabelIsRequired,
   type DisplaySurface,
+  type StaleDisplayMode,
 } from "./display-policy";
 import { matchIsTrusted } from "./external-identity";
 import type { PlaceFact, PlaceFactKind } from "./facts";
@@ -80,6 +82,20 @@ import type {
  * not render cards.
  */
 const CARD_SURFACE: DisplaySurface = "in-app";
+
+/**
+ * How this card treats a fact past its staleness interval.
+ *
+ * `"label"`, and the option is safe to apply to the whole card rather than to the description alone because
+ * `STALE_LABELLABLE_FACT_KINDS` is the enforcement. Only `official-description` is on that list, so a stale
+ * `inception-year` is still refused by the same call that lets a stale description through — which is the property worth
+ * having, since a rule of the form "remember to pass this only for the description" is one a later edit forgets.
+ *
+ * The trade the mode makes: a 40-day-old Wikidata sentence is almost certainly still true, and refusing it removes
+ * correct information to prevent nothing. A date is different only in that a date does not go *slightly* out of date —
+ * it is either right or it is a different date — so there is no label that improves it.
+ */
+const CARD_STALENESS: StaleDisplayMode = "label";
 
 /**
  * The fact kinds a landmark card shows, in the order it shows them.
@@ -164,8 +180,15 @@ export type LandmarkCardIntelligence = {
    * version that drifts is the one that renders a heading over nothing.
    */
   hasContext: boolean;
-  /** The one description to show, with the source that wrote it. Selection, never composition. */
-  description: { text: string; provider: ProviderId } | null;
+  /**
+   * The one description to show, with the source that wrote it. Selection, never composition.
+   *
+   * `stale` means "not checked recently", and a card that renders the text **must** render a visible label when it is
+   * set — the sentence was admitted on the understanding that the caveat travels with it. It is not a hedge about
+   * accuracy: the text is almost certainly still correct, and the label says when Roamly last asked rather than casting
+   * doubt on the source.
+   */
+  description: { text: string; provider: ProviderId; stale: boolean } | null;
   photo: LandmarkCardPhoto | null;
   /** In `LANDMARK_CARD_FACT_KINDS` order, and only the kinds that survived every gate. */
   facts: LandmarkCardFact[];
@@ -213,7 +236,12 @@ export function deriveLandmarkCardIntelligence(input: {
    * simply absent.
    */
   const conflicts = detectConflicts(place.placeId, intelligence.facts);
-  const gate = { surface: CARD_SURFACE, now, conflicts } as const;
+  const gate = {
+    surface: CARD_SURFACE,
+    now,
+    conflicts,
+    staleness: CARD_STALENESS,
+  } as const;
 
   const descriptionFact = selectDescription(intelligence.facts, gate);
 
@@ -260,6 +288,15 @@ export function deriveLandmarkCardIntelligence(input: {
     ? {
         text: String(descriptionFact.value),
         provider: descriptionFact.provenance.provider,
+        /*
+         * Asked of `display-policy` rather than computed from `factIsStale` here, so that "permitted stale" and "must be
+         * labelled" cannot drift apart. If the labellable set ever loses `official-description`, this returns `false`
+         * because the fact would no longer have been selected at all.
+         */
+        stale: staleLabelIsRequired(descriptionFact, {
+          now,
+          staleness: CARD_STALENESS,
+        }),
       }
     : null;
 

@@ -62,7 +62,7 @@ describe("offlineReasonFor", () => {
     expect(offlineReasonFor("refresh-pool")).toContain("OpenStreetMap");
   });
 
-  /** The five surfaces that disable themselves. A sixth added without a reason would fail this. */
+  /** The six surfaces that disable themselves. A seventh added without a reason would fail this. */
   it("covers exactly the actions that cannot work offline", () => {
     expect([...PROVIDER_BACKED_ACTIONS]).toEqual([
       "generate",
@@ -70,6 +70,15 @@ describe("offlineReasonFor", () => {
       "route",
       "refine",
       "refresh-pool",
+      "enrich-landmarks",
     ]);
+  });
+
+  it("names both volunteer projects a landmark lookup depends on", () => {
+    /* Two separate projects, and a traveller who recognises one may not recognise the other. */
+    const reason = offlineReasonFor("enrich-landmarks");
+
+    expect(reason).toContain("Wikidata");
+    expect(reason).toContain("Wikimedia Commons");
   });
 });

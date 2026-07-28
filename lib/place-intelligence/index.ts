@@ -147,9 +147,12 @@ export {
   mayDisplayMedia,
   requiredAttributions,
   selectDescription,
+  staleLabelIsRequired,
   DESCRIPTION_SOURCE_ORDER,
   REQUIRED_ATTRIBUTION,
+  STALE_LABELLABLE_FACT_KINDS,
   type DisplaySurface,
+  type StaleDisplayMode,
 } from "./display-policy";
 
 /**

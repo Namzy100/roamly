@@ -94,6 +94,7 @@ describe("the ordinary case", () => {
     expect(result.description).toEqual({
       text: "tile museum in Lisbon, Portugal",
       provider: "wikidata",
+      stale: false,
     });
     expect(result.facts.map((row) => row.kind)).toEqual([
       "inception-year",
@@ -303,15 +304,51 @@ describe("the display gates each fact passes", () => {
     expect(result.hasContext).toBe(false);
   });
 
-  it("drops a stale fact rather than presenting it as current", () => {
-    /* A year past the retrieval date. `factIsUsable` is the gate; this asserts the card honours it. */
+  it("labels a stale description and still drops the stale date beside it", () => {
+    /*
+     * A year past the retrieval date, and the two kinds part company — which is the point of the case.
+     *
+     * The description stays, marked stale: a Wikidata sentence about a 16th-century museum does not stop being true
+     * because Roamly last asked a year ago, and hiding it would remove correct information to prevent nothing. The date
+     * goes, because a date does not go *slightly* out of date — it is either right or it is a different date, and there
+     * is no label that improves it. Both outcomes come from one `mayDisplayFact` call under one option; the kind
+     * allow-list inside `display-policy` is what separates them.
+     */
     const result = derive(
       MUSEUM,
       landmarkSidecar({ facts: [DESCRIPTION, INCEPTION] }),
       "2027-07-28T12:00:00.000Z",
     );
 
+    expect(result.description).toEqual({
+      text: "tile museum in Lisbon, Portugal",
+      provider: "wikidata",
+      stale: true,
+    });
     expect(result.facts).toEqual([]);
+    expect(result.hasContext).toBe(true);
+  });
+
+  it("marks a freshly retrieved description as not stale", () => {
+    const result = derive(MUSEUM, landmarkSidecar({ facts: [DESCRIPTION] }));
+
+    expect(result.description?.stale).toBe(false);
+  });
+
+  it("drops an expired description outright, label or no label", () => {
+    /*
+     * The line the label mode does not cross. Staleness asks "should we check again?"; expiry asks "does this still
+     * describe anything?" — and a caveat cannot rescue a sentence about something that has ended.
+     */
+    const expired = fact({
+      kind: "official-description",
+      value: "tile museum in Lisbon, Portugal",
+      provider: "wikidata",
+      validUntil: "2026-01-01T00:00:00.000Z",
+    });
+
+    const result = derive(MUSEUM, landmarkSidecar({ facts: [expired] }));
+
     expect(result.description).toBeNull();
     expect(result.hasContext).toBe(false);
   });

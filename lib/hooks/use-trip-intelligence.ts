@@ -1,17 +1,23 @@
 "use client";
 
 import { nanoid } from "nanoid";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   persistableEntries,
   runEnrichmentWorkflow,
-  type EnrichmentWorkflowResult,
+  MAX_ENRICHMENT_CALLS,
 } from "@/lib/api/enrich-workflow";
 import type { EnrichTripPlacesRequest } from "@/lib/api/place-intelligence-contract";
+import { useOnlineStatus } from "@/lib/hooks/use-online-status";
 import { selectLandmarkCandidates } from "@/lib/place-intelligence";
-import type { SaveTripIntelligenceResult } from "@/lib/store/trip-intelligence";
 import { useTripRecord, useTripStore } from "@/lib/store/trip-store";
+import {
+  describeSaveResult,
+  describeWorkflowStop,
+  type TripIntelligenceStatus,
+  type TripIntelligenceUiState,
+} from "@/lib/trip/trip-intelligence-ui";
 
 /**
  * The "look up these landmarks" workflow.
@@ -47,12 +53,55 @@ import { useTripRecord, useTripStore } from "@/lib/store/trip-store";
  * wrong or stale.
  */
 
-export type TripIntelligenceStatus =
-  | "idle"
-  | "running"
-  | "done"
-  | "unchanged"
-  | "failed";
+/**
+ * The twelve states a control may be in — defined in `lib/trip/trip-intelligence-ui.ts` and re-exported here so the name
+ * keeps its original public path.
+ *
+ * ## Why it replaced a five-value union
+ *
+ * The first version had `running`, `done` and `unchanged`, which is enough to drive a spinner and not enough to tell a
+ * traveller the truth. Each of the three was hiding distinctions that matter to the person reading the screen:
+ *
+ *  - `running` is three different situations — a first call, a continuation, and a store write. Only the middle can say
+ *    "still going, 2 of 3 calls used", and only the last must not be cancelled.
+ *  - `done` is two — every place answered, or some answered and some not. Reporting the second as the first is the
+ *    specific dishonesty of claiming a trip was fully checked when the continuation stopped early.
+ *  - `unchanged` is three — nothing eligible to ask about, nothing *new* to ask about, and a refresh that found nothing.
+ *    The first is a property of the trip and the last is a property of the world, and the remedies differ.
+ *
+ * Two of the twelve are never produced by a run at all: `no-eligible-landmarks` and `offline` are conditions that hold
+ * *before* anything is pressed, so they are derived at the end of this hook rather than stored — a stored value would go
+ * out of date the moment a traveller reconnected. `unconfigured` is the opposite: once a deployment has said it cannot do
+ * this, the answer sticks, because trying again would produce the same 503.
+ */
+export type { TripIntelligenceStatus };
+
+/**
+ * How far one action has got, from responses that passed the contract.
+ *
+ * Mapped from `EnrichmentWorkflowProgress` rather than re-derived, so a panel and the workflow cannot disagree. Only the
+ * fields a control actually renders are carried across — `remainingPlaceIds` stays in the workflow, because a panel
+ * holding it would be tempted to list places mid-run and that list reshuffles as answers arrive.
+ */
+export type TripIntelligenceProgress = {
+  /** Requested places that now have an answer of some kind. Never above `total`. */
+  checked: number;
+  /** The de-duplicated place count for this action. Constant for its whole duration. */
+  total: number;
+  matched: number;
+  /** No answer yet, plus the places that were asked about and failed. */
+  unresolved: number;
+  /**
+   * How many requests have **completed**, not how many are planned.
+   *
+   * Deliberately a count of the past. The hook cannot know whether another call will go out — that depends on what the
+   * server says next — so a field naming the in-flight call would be a prediction. `status` already distinguishes
+   * `checking` from `continuing`, which is the part a reader needs live.
+   */
+  call: number;
+  /** The ceiling in force, so a control can say "2 of 3 used" without importing the constant. */
+  maximumCalls: number;
+};
 
 export type TripIntelligenceState = {
   status: TripIntelligenceStatus;
@@ -62,6 +111,15 @@ export type TripIntelligenceState = {
   unresolved: number;
   /** One sentence for the traveller, or `null`. Never a provider message. */
   message: string | null;
+  /** Present once an action has started; `null` before the first one. */
+  progress: TripIntelligenceProgress | null;
+  /**
+   * Whether the last outcome left something worth trying again.
+   *
+   * From `TripIntelligenceUiState.canRetry`, so a panel offers a retry exactly when one would achieve something — not
+   * merely whenever a run ended badly. A conflict, for instance, ends badly and wants a reload.
+   */
+  canRetry: boolean;
 };
 
 const IDLE: TripIntelligenceState = {
@@ -69,6 +127,8 @@ const IDLE: TripIntelligenceState = {
   matched: 0,
   unresolved: 0,
   message: null,
+  progress: null,
+  canRetry: false,
 };
 
 export function useTripIntelligence(tripId: string) {
@@ -81,9 +141,35 @@ export function useTripIntelligence(tripId: string) {
   );
 
   const [state, setState] = useState<TripIntelligenceState>(IDLE);
+  const online = useOnlineStatus();
 
   const inFlight = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  /**
+   * Which places this trip permits asking about, decided at render time.
+   *
+   * Hoisted out of the click handler because a control has to be able to say *why* it is disabled before anybody presses
+   * it, and "this trip has no eligible landmarks" is not knowable from the run state. Safe to compute on every render:
+   * `selectLandmarkCandidates` is a pure filter over the plan and the pool, and the memo is about avoiding a new array
+   * identity rather than about cost.
+   */
+  const candidates = useMemo(
+    () =>
+      record
+        ? selectLandmarkCandidates({
+            plan: record.plan,
+            pool: record.generation?.placePool ?? null,
+          }).map((candidate) => candidate.place)
+        : [],
+    [record],
+  );
+
+  /** Candidates with no sidecar entry yet — what `enrich` would ask about, and nothing more. */
+  const unchecked = useMemo(() => {
+    const known = record?.intelligence?.byCanonicalPlaceId ?? {};
+    return candidates.filter((place) => !known[place.placeId]);
+  }, [candidates, record]);
 
   /*
    * Abort on unmount, so navigating away does not leave a serial run going against a volunteer service for a trip
@@ -105,31 +191,38 @@ export function useTripIntelligence(tripId: string) {
       if (!current) return;
 
       /*
-       * Which places to ask about, decided by the eligibility policy rather than here.
-       *
-       * `selectLandmarkCandidates` returns eligible places in itinerary-first order, capped at twelve. The route applies
-       * both rules again — a bound in one place is a bound somebody can forget.
+       * Refused rather than attempted while offline, which is the same rule every other provider-backed action follows.
+       * A control is disabled in this state, so reaching here means the state changed between render and click — and
+       * starting a request that cannot succeed would spend a spinner to arrive at the answer we already have.
        */
-      const candidates = selectLandmarkCandidates({
-        plan: current.plan,
-        pool: current.generation?.placePool ?? null,
-      }).map((candidate) => candidate.place);
+      if (!online) return;
 
-      const known = current.intelligence?.byCanonicalPlaceId ?? {};
-      const places =
-        mode === "refresh"
-          ? candidates
-          : candidates.filter((place) => !known[place.placeId]);
+      /*
+       * Which places to ask about. The eligibility policy decided the candidate list — see `candidates` above, capped at
+       * twelve in itinerary-first order — and the route applies both rules again, because a bound in one place is a bound
+       * somebody can forget.
+       */
+      const places = mode === "refresh" ? candidates : unchecked;
 
       if (places.length === 0) {
+        /*
+         * Two different nothings, and the split is the reason `unchanged` was retired.
+         *
+         * "Nothing eligible in this trip" is a property of the itinerary that no amount of trying changes, so it reads as
+         * a statement rather than a result. "Everything already looked up" is a finished action with nothing left to do,
+         * which is what `empty` means everywhere else in this union.
+         */
+        const nothingEligible = candidates.length === 0;
+
         setState({
-          status: "unchanged",
+          status: nothingEligible ? "no-eligible-landmarks" : "empty",
           matched: 0,
           unresolved: 0,
-          message:
-            mode === "enrich" && candidates.length > 0
-              ? "Every landmark in this trip has already been looked up."
-              : "This trip has no landmarks to look up.",
+          message: nothingEligible
+            ? "This trip has no landmarks to look up."
+            : "Every landmark in this trip has already been looked up.",
+          progress: null,
+          canRetry: false,
         });
         return;
       }
@@ -140,7 +233,27 @@ export function useTripIntelligence(tripId: string) {
 
       /* The revision read *before* the first request. The store refuses the write if it moved. */
       const expectedRevision = current.revision;
-      setState({ ...IDLE, status: "running" });
+
+      /*
+       * The opening progress line: the total is known, and nothing has been checked.
+       *
+       * Set before the first request rather than waiting for the first response, because "checking 12 places" is the one
+       * thing a traveller wants to see immediately and it is already true. `call: 0` says no request has completed —
+       * the count is of the past throughout.
+       */
+      setState({
+        ...IDLE,
+        status: "checking",
+        unresolved: places.length,
+        progress: {
+          checked: 0,
+          total: places.length,
+          matched: 0,
+          unresolved: places.length,
+          call: 0,
+          maximumCalls: MAX_ENRICHMENT_CALLS,
+        },
+      });
 
       /** The last non-2xx code, so a misconfigured deployment can be reported as itself. */
       let httpFailure: string | null = null;
@@ -151,6 +264,32 @@ export function useTripIntelligence(tripId: string) {
           expectedRevision,
           requestId: `enrich-${nanoid(12)}`,
           signal: controller.signal,
+          onProgress: (progress) => {
+            /*
+             * Reported from validated responses only — the workflow guarantees that, which is why these counts are not
+             * derived here from the raw body.
+             *
+             * `continuing` while places remain is a statement about the run not being finished, not a promise that
+             * another request will go out: the workflow may stop itself on the server's say-so, and the settled status
+             * then replaces this one. The alternative — waiting to see whether a continuation happens — would leave the
+             * panel claiming a first call is still in flight after it has returned.
+             */
+            setState((previous) => ({
+              ...previous,
+              status:
+                progress.checked < progress.total ? "continuing" : "checking",
+              matched: progress.matched,
+              unresolved: progress.unresolved,
+              progress: {
+                checked: progress.checked,
+                total: progress.total,
+                matched: progress.matched,
+                unresolved: progress.unresolved,
+                call: progress.call,
+                maximumCalls: progress.maximumCalls,
+              },
+            }));
+          },
           post: async (request: EnrichTripPlacesRequest, signal) => {
             const response = await fetch("/api/place-intelligence/enrich", {
               method: "POST",
@@ -178,14 +317,22 @@ export function useTripIntelligence(tripId: string) {
         const entries = persistableEntries(result);
 
         if (entries.length === 0) {
-          setState({
-            status: result.stop === "failed" ? "failed" : "unchanged",
-            matched: 0,
-            unresolved: result.unresolved,
-            message: describeStop(result, httpFailure),
+          const outcome = describeWorkflowStop({
+            result,
+            failure: httpFailure,
           });
+          /* Progress is kept, so a panel can still say how much of the trip was reached before it came to nothing. */
+          setState((previous) => toState(outcome, previous.progress));
           return;
         }
+
+        /*
+         * The write is its own visible state, and it is the one that must not be interrupted.
+         *
+         * A control showing "checking" through the save would offer a Cancel button that cannot honour itself: the
+         * requests are already finished, and there is nothing left to abort but a synchronous store call.
+         */
+        setState((previous) => ({ ...previous, status: "saving" }));
 
         /* The one write. Everything before this was in memory. */
         const saved = saveTripIntelligence({
@@ -195,13 +342,18 @@ export function useTripIntelligence(tripId: string) {
           fetchedAt: new Date().toISOString(),
         });
 
-        setState(describeSave(saved, result, httpFailure));
+        const outcome = describeSaveResult({
+          saved,
+          result,
+          failure: httpFailure,
+        });
+        setState((previous) => toState(outcome, previous.progress));
       } finally {
         inFlight.current = false;
         abortRef.current = null;
       }
     },
-    [record, saveTripIntelligence, tripId],
+    [candidates, online, record, saveTripIntelligence, tripId, unchecked],
   );
 
   const enrich = useCallback(() => run("enrich"), [run]);
@@ -226,101 +378,75 @@ export function useTripIntelligence(tripId: string) {
     setState(
       result.status === "saved"
         ? {
-            status: "done",
-            matched: 0,
-            unresolved: 0,
+            /*
+             * Back to `idle`, not to a finished state. Nothing was looked up, so there is no outcome to report — and the
+             * control the traveller sees next should be the one that offers to look things up again.
+             */
+            ...IDLE,
             message: "Landmark details were removed from this trip.",
           }
-        : describeSave(result, null, null),
+        : toState(describeSaveResult({ saved: result, result: null, failure: null })),
     );
   }, [clearTripIntelligence, record, tripId]);
 
-  return { ...state, enrich, refresh, clear, cancel } as const;
+  /**
+   * The two conditions that are true before anything is pressed, layered over the run state.
+   *
+   * Derived rather than stored, because both change without any action of ours: a traveller reconnects, or edits the
+   * itinerary until a museum is in it. A `useEffect` mirroring them into state would render once with the stale answer
+   * every time either changed.
+   *
+   * Only `idle` is overridden. A settled run keeps its result — going offline after a successful lookup does not unsay
+   * what was found — and an in-flight run keeps its progress, because the request either completes or fails on its own.
+   *
+   * `no-eligible-landmarks` outranks `offline` when both hold: reconnecting would not help, so naming the network would
+   * send a traveller to fix the wrong thing.
+   */
+  const status: TripIntelligenceStatus =
+    state.status === "idle"
+      ? candidates.length === 0
+        ? "no-eligible-landmarks"
+        : online
+          ? "idle"
+          : "offline"
+      : state.status;
+
+  return {
+    ...state,
+    status,
+    /**
+     * How many places this trip permits asking about at all, and how many of those are still unknown.
+     *
+     * Exposed so a control can label itself honestly before it is pressed — "Check 4 landmarks" is a different button
+     * from "Check 12 landmarks", and a disabled one owes the traveller the reason.
+     */
+    eligibleCount: candidates.length,
+    uncheckedCount: unchecked.length,
+    enrich,
+    refresh,
+    clear,
+    cancel,
+  } as const;
 }
 
 /**
- * What to tell the traveller about a run that wrote nothing.
+ * A settled outcome, as the hook's own state.
  *
- * Every sentence explains rather than apologises, and none of them names a provider, a host or an HTTP status —
- * `failure` is our own code, produced by our own route.
+ * The two shapes differ in exactly two ways: the copy module calls the discriminant `phase`, because to it the value is
+ * the answer rather than a status; and it knows nothing about `progress`, because progress belongs to the run. Both
+ * differences are intentional, so this adapter is where they meet rather than a reason to make the shapes identical.
  */
-function describeStop(
-  result: EnrichmentWorkflowResult,
-  failure: string | null,
-): string {
-  if (failure === "provider_misconfigured") {
-    return "Landmark details are not available on this deployment.";
-  }
-  if (result.stop === "provider-stopped") {
-    return "Wikimedia asked us to slow down, so the lookup stopped. Try again later.";
-  }
-  if (result.stop === "failed") {
-    return "The landmark lookup did not complete, so nothing was changed.";
-  }
-  return "No landmark details were found for this trip.";
-}
-
-/** The result of the one write, as a sentence and a status. */
-function describeSave(
-  saved: SaveTripIntelligenceResult,
-  result: EnrichmentWorkflowResult | null,
-  failure: string | null,
+function toState(
+  outcome: TripIntelligenceUiState,
+  progress: TripIntelligenceProgress | null = null,
 ): TripIntelligenceState {
-  const unresolved = result?.unresolved ?? 0;
-
-  switch (saved.status) {
-    case "saved":
-      return {
-        status: "done",
-        matched: saved.matched,
-        unresolved,
-        message:
-          unresolved > 0
-            ? `Found details for ${saved.matched} ${plural(saved.matched)}. ${unresolved} could not be looked up — try again later.`
-            : `Found details for ${saved.matched} ${plural(saved.matched)}.`,
-      };
-    case "unchanged":
-      return {
-        status: "unchanged",
-        matched: 0,
-        unresolved,
-        message: "Nothing new was found, so the trip is unchanged.",
-      };
-    case "conflict":
-      return {
-        status: "failed",
-        matched: 0,
-        unresolved,
-        message:
-          "This trip changed in another tab, so nothing was saved. Reload and try again.",
-      };
-    case "missing-trip":
-      return {
-        status: "failed",
-        matched: 0,
-        unresolved,
-        message:
-          "This trip is no longer saved in this browser, so nothing was saved.",
-      };
-    case "storage-refused":
-      return {
-        status: "failed",
-        matched: 0,
-        unresolved,
-        message: saved.reason,
-      };
-    case "invalid":
-      return {
-        status: "failed",
-        matched: 0,
-        unresolved,
-        message: result
-          ? describeStop(result, failure)
-          : "The landmark details could not be saved.",
-      };
-  }
+  return {
+    status: outcome.phase,
+    matched: outcome.matched,
+    unresolved: outcome.unresolved,
+    message: outcome.message,
+    progress,
+    canRetry: outcome.canRetry,
+  };
 }
 
-function plural(count: number): string {
-  return count === 1 ? "place" : "places";
-}

@@ -13,6 +13,7 @@ import {
   runEnrichmentWorkflow,
   MAX_ENRICHMENT_CALLS,
   type EnrichmentPost,
+  type EnrichmentWorkflowProgress,
 } from "./enrich-workflow";
 import type {
   EnrichOutcome,
@@ -94,7 +95,11 @@ function requestsFrom(post: PostMock) {
   return post.mock.calls.map((call) => call[0] as EnrichTripPlacesRequest);
 }
 
-function run(post: PostMock, signal?: AbortSignal) {
+function run(
+  post: PostMock,
+  signal?: AbortSignal,
+  onProgress?: (progress: EnrichmentWorkflowProgress) => void,
+) {
   return runEnrichmentWorkflow({
     places: PLACES,
     expectedRevision: 3,
@@ -106,7 +111,17 @@ function run(post: PostMock, signal?: AbortSignal) {
      */
     post: post as unknown as EnrichmentPost,
     signal,
+    onProgress,
   });
+}
+
+/** Runs, collecting every emission, so a test can assert the whole sequence rather than only the last line. */
+async function withProgress(post: PostMock, signal?: AbortSignal) {
+  const seen: EnrichmentWorkflowProgress[] = [];
+  const result = await run(post, signal, (progress) => {
+    seen.push(progress);
+  });
+  return { result, seen };
 }
 
 describe("a complete run", () => {
@@ -361,6 +376,24 @@ describe("the final report", () => {
     expect(result.unresolvedPlaceIds).toEqual([GALLERY.placeId]);
   });
 
+  it("agrees with the last progress emission it reported", async () => {
+    /*
+     * The one invariant tying the two together. A progress line and a final line that counted differently would look
+     * like the last call had undone something, and a reader would trust whichever they happened to see.
+     */
+    const post = vi
+      .fn()
+      .mockResolvedValue(response([matched(MUSEUM), failed(GALLERY)]));
+
+    const { result, seen } = await withProgress(post);
+    const last = seen[seen.length - 1];
+
+    expect(last.matched).toBe(result.matched);
+    expect(last.unresolved).toBe(result.unresolved);
+    expect(last.remainingPlaceIds).toEqual([HOTEL.placeId]);
+    expect(result.unresolvedPlaceIds).toEqual([GALLERY.placeId, HOTEL.placeId]);
+  });
+
   it("offers only sidecar-bearing outcomes for persistence", async () => {
     const post = vi
       .fn()
@@ -374,5 +407,207 @@ describe("the final report", () => {
       MUSEUM.placeId,
       GALLERY.placeId,
     ]);
+  });
+});
+
+/**
+ * Progress, which exists so a panel can say what is happening without opening an unvalidated response.
+ *
+ * Two properties carry the weight, and both are about *not* reporting: nothing is emitted for a response that failed the
+ * contract, because those numbers would be read out of a body the schema rejected; and nothing a listener does can change
+ * what the workflow decides or costs a traveller a validated answer.
+ */
+describe("progress reporting", () => {
+  it("reports once per validated call, naming the call that finished", async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response([matched(MUSEUM)], { code: "budget_exhausted", attempted: 1 }),
+      )
+      .mockResolvedValueOnce(response([matched(GALLERY), review(HOTEL)]));
+
+    const { seen } = await withProgress(post);
+
+    expect(seen).toHaveLength(2);
+    expect(seen.map((entry) => entry.phase)).toEqual([
+      "checking",
+      "continuing",
+    ]);
+    expect(seen.map((entry) => entry.call)).toEqual([1, 2]);
+    expect(seen.map((entry) => entry.maximumCalls)).toEqual([
+      MAX_ENRICHMENT_CALLS,
+      MAX_ENRICHMENT_CALLS,
+    ]);
+    /* The second call asked about the two still outstanding, which is the number a "checking 2 places" line needs. */
+    expect(seen.map((entry) => entry.requestedThisCall)).toEqual([3, 2]);
+  });
+
+  it("counts up towards a total that never moves", async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response([matched(MUSEUM)], { code: "budget_exhausted", attempted: 1 }),
+      )
+      .mockResolvedValueOnce(response([matched(GALLERY), matched(HOTEL)]));
+
+    const { seen } = await withProgress(post);
+
+    expect(seen.map((entry) => entry.checked)).toEqual([1, 3]);
+    expect(seen.map((entry) => entry.total)).toEqual([3, 3]);
+    expect(seen.map((entry) => entry.remainingPlaceIds)).toEqual([
+      [GALLERY.placeId, HOTEL.placeId],
+      [],
+    ]);
+  });
+
+  it("counts each kind of answer separately", async () => {
+    const post = vi.fn().mockResolvedValue(
+      response([
+        matched(MUSEUM),
+        review(GALLERY),
+        {
+          status: "unmatched",
+          canonicalPlaceId: HOTEL.placeId,
+          reason: "A hotel is commercial premises rather than a landmark.",
+        },
+      ]),
+    );
+
+    const { seen } = await withProgress(post);
+
+    expect(seen[0].matched).toBe(1);
+    expect(seen[0].review).toBe(1);
+    expect(seen[0].unmatched).toBe(1);
+    expect(seen[0].failed).toBe(0);
+    /* `unmatched` and `review` are answers, so nothing is unresolved even though only one place matched. */
+    expect(seen[0].unresolved).toBe(0);
+  });
+
+  it("counts a failed outcome as both failed and unresolved", async () => {
+    const post = vi
+      .fn()
+      .mockResolvedValue(
+        response([matched(MUSEUM), failed(GALLERY), failed(HOTEL)]),
+      );
+
+    const { seen } = await withProgress(post);
+
+    expect(seen[0].checked).toBe(3);
+    expect(seen[0].failed).toBe(2);
+    /* Checked and still unknown: the place was asked about and cannot be described. Both numbers are true at once. */
+    expect(seen[0].unresolved).toBe(2);
+    expect(seen[0].remainingPlaceIds).toEqual([]);
+  });
+
+  it("ignores an outcome for a place nobody asked about", async () => {
+    /*
+     * A progress bar reading 4 of 3 is a bug report from a traveller, and it is reachable from a response that answers a
+     * canonical id outside the request. Counting from the *requested* set makes it unreachable.
+     */
+    const post = vi.fn().mockResolvedValue(
+      response([
+        matched(MUSEUM),
+        matched(GALLERY),
+        matched(HOTEL),
+        {
+          status: "unmatched",
+          canonicalPlaceId: "osm:node/999999999",
+          reason: "A place nobody asked about.",
+        },
+      ]),
+    );
+
+    const { seen } = await withProgress(post);
+
+    expect(seen[0].checked).toBe(3);
+    expect(seen[0].total).toBe(3);
+    expect(seen[0].matched).toBe(3);
+    expect(seen[0].unmatched).toBe(0);
+  });
+
+  it("reports nothing for a response that failed the contract", async () => {
+    /*
+     * The reason progress lives in this module rather than in the hook. These counts would have to come out of a body
+     * the schema rejected — which is the data the schema exists to refuse.
+     */
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response([matched(MUSEUM)], { code: "budget_exhausted", attempted: 1 }),
+      )
+      .mockResolvedValueOnce({ outcomes: "not an array" });
+
+    const { result, seen } = await withProgress(post);
+
+    expect(result.stop).toBe("failed");
+    /* One emission, for the one call that parsed. */
+    expect(seen).toHaveLength(1);
+    expect(seen[0].call).toBe(1);
+  });
+
+  it("reports nothing for a transport failure or an abort before any call", async () => {
+    const failing = vi.fn().mockRejectedValue(new Error("network down"));
+    expect((await withProgress(failing)).seen).toEqual([]);
+
+    const controller = new AbortController();
+    controller.abort();
+    const never = vi.fn();
+    expect((await withProgress(never, controller.signal)).seen).toEqual([]);
+  });
+
+  it("still reports the answers of a call that ended the run", async () => {
+    /* A rate-limited response that answered one place established something. Discarding the count would hide it. */
+    const post = vi.fn().mockResolvedValue(
+      response([matched(MUSEUM)], {
+        code: "wikimedia_rate_limited",
+        retryAfterMs: 30_000,
+        attempted: 1,
+      }),
+    );
+
+    const { result, seen } = await withProgress(post);
+
+    expect(result.stop).toBe("provider-stopped");
+    expect(seen).toHaveLength(1);
+    expect(seen[0].matched).toBe(1);
+    expect(seen[0].unresolved).toBe(2);
+  });
+
+  it("does not let a throwing listener cost the run its results", async () => {
+    /*
+     * The one deliberate swallow in the module. Progress is decoration; a reporter that throws must not turn "the
+     * progress line crashed" into "the enrichment you waited for was thrown away".
+     */
+    const post = vi
+      .fn()
+      .mockResolvedValue(
+        response([matched(MUSEUM), matched(GALLERY), matched(HOTEL)]),
+      );
+
+    const result = await run(post, undefined, () => {
+      throw new Error("a listener misbehaved");
+    });
+
+    expect(result.stop).toBe("complete");
+    expect(result.matched).toBe(3);
+  });
+
+  it("reports nothing at all when no listener was given", async () => {
+    /* The default path, and the one every existing caller takes. The workflow must behave identically. */
+    const post = vi
+      .fn()
+      .mockResolvedValue(
+        response([matched(MUSEUM), matched(GALLERY), matched(HOTEL)]),
+      );
+
+    const result = await runEnrichmentWorkflow({
+      places: PLACES,
+      expectedRevision: 3,
+      requestId: "req-workflow-0001",
+      post: post as unknown as EnrichmentPost,
+    });
+
+    expect(result.stop).toBe("complete");
+    expect(result.matched).toBe(3);
   });
 });

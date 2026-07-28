@@ -1,6 +1,11 @@
 import { disputedKinds, type FactConflict } from "./conflicts";
-import { factKindIsRefused, type PlaceFact } from "./facts";
-import { factIsUsable } from "./freshness";
+import {
+  factKindIsRefused,
+  FACT_VOLATILITY,
+  type PlaceFact,
+  type PlaceFactKind,
+} from "./facts";
+import { factIsExpired, factIsStale } from "./freshness";
 import { mediaIsDisplayable, type PlaceMedia } from "./media";
 import { attributionIsRequired, type FactProvenance } from "./provenance";
 import type { IsoTimestamp, Permission, ProviderId } from "./types";
@@ -68,12 +73,80 @@ export const REQUIRED_ATTRIBUTION: Partial<Record<ProviderId, string>> = {
    */
 };
 
+/* -------------------------------------------------------------------------- */
+/* Staleness: a refusal by default, a label by explicit request                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a surface wants done with a fact that is past its staleness interval.
+ *
+ * `"refuse"` is the default everywhere and stays the default, because the failure a display gate exists to prevent is an
+ * interface asserting something it cannot support. `"label"` is the narrow exception, and it is narrow in two directions
+ * at once — the surface has to ask for it *and* the fact's kind has to permit it.
+ *
+ * ## Why an exception exists at all
+ *
+ * Refusing is right for a phone number and wrong for a description. A stale phone number shown as current sends somebody
+ * to a disconnected line; a Wikidata description last checked 40 days ago is almost certainly still true, and hiding it
+ * removes correct information in exchange for nothing. `LANDMARK_TTL_MS.officialDescription` records that consequence,
+ * and this is the mechanism it referred to.
+ *
+ * ## Why it is a mode rather than a change to the gate
+ *
+ * Softening `mayDisplayFact` for descriptions unconditionally would have made every existing caller more permissive
+ * without any of them asking, which is the wrong default for a licensing and accuracy boundary. An opt-in means the
+ * permissive path is visible at the call site, and a new surface gets the strict behaviour by omission.
+ */
+export type StaleDisplayMode = "refuse" | "label";
+
+/**
+ * The fact kinds that may be shown stale, provided the caller asks for `"label"`.
+ *
+ * One entry, and the allow-list rather than a call-site rule is the enforcement. A surface that opts into `"label"` for
+ * its description will pass the same option to every other fact it renders — the landmark card does exactly that — so
+ * "stale non-description facts remain refused" has to hold *inside* this module or it does not hold at all.
+ *
+ * Membership requires `durable` volatility, asserted below rather than assumed. A `perishable` kind in this set would be
+ * a contradiction: labelling a forecast "not checked recently" still presents it as describing now, and `factIsExpired`
+ * — which no mode softens — is the gate that actually governs it.
+ */
+export const STALE_LABELLABLE_FACT_KINDS: ReadonlySet<PlaceFactKind> =
+  new Set<PlaceFactKind>(["official-description"]);
+
+function staleDisplayPermitted(
+  fact: PlaceFact,
+  staleness: StaleDisplayMode | undefined,
+): boolean {
+  if (staleness !== "label") return false;
+  if (!STALE_LABELLABLE_FACT_KINDS.has(fact.kind)) return false;
+  return FACT_VOLATILITY[fact.kind] === "durable";
+}
+
+/**
+ * Whether a fact that `mayDisplayFact` permitted must render with a "not checked recently" label.
+ *
+ * The other half of `"label"` mode, and the reason the mode is safe: permission without the label would be the exact
+ * failure the refusal prevented, so the two are derived from one place rather than each surface remembering.
+ *
+ * Answers `false` under `"refuse"` — not because nothing is stale then, but because a stale fact never reached a screen
+ * to be labelled.
+ */
+export function staleLabelIsRequired(
+  fact: PlaceFact,
+  input: { now: IsoTimestamp; staleness?: StaleDisplayMode },
+): boolean {
+  if (!staleDisplayPermitted(fact, input.staleness)) return false;
+  return factIsStale(fact, input.now);
+}
+
 export function mayDisplayFact(
   fact: PlaceFact,
   input: {
     surface: DisplaySurface;
     now: IsoTimestamp;
     conflicts?: FactConflict[];
+    /** Defaults to `"refuse"`. See `StaleDisplayMode`. */
+    staleness?: StaleDisplayMode;
   },
 ): Permission {
   if (factKindIsRefused(fact.kind)) return "denied";
@@ -94,10 +167,22 @@ export function mayDisplayFact(
   /*
    * Freshness is a display gate, not merely a refresh hint.
    *
-   * A stale phone number shown as current is the same failure as a stale forecast: the interface asserts
-   * something it cannot support. `factIsUsable` answers both the expiry and the staleness question.
+   * A stale phone number shown as current is the same failure as a stale forecast: the interface asserts something it
+   * cannot support. The two freshness questions are asked separately here rather than through `factIsUsable`, because
+   * only one of them has an exception:
+   *
+   *  - **expiry** — "does this still describe anything?" — refuses unconditionally, and no `staleness` mode softens it.
+   *    A label cannot rescue a fact about a moment that has passed; "possibly out of date" over yesterday's forecast is
+   *    a false reassurance, not a caveat.
+   *  - **staleness** — "should we ask again?" — refuses unless the caller opted into `"label"` *and* the kind allows it.
    */
-  if (!factIsUsable(fact, input.now)) return "denied";
+  if (factIsExpired(fact, input.now)) return "denied";
+  if (
+    factIsStale(fact, input.now) &&
+    !staleDisplayPermitted(fact, input.staleness)
+  ) {
+    return "denied";
+  }
 
   if (
     input.surface === "map" &&
@@ -168,13 +253,22 @@ export const DESCRIPTION_SOURCE_ORDER: readonly ProviderId[] = ["wikidata"];
  *
  * ## Every ordinary display gate still applies
  *
- * `mayDisplayFact` runs first, so a description that is stale, refused by its recorded policy, or unlicensed for the
- * surface is not selectable — "valid and non-stale" is that function's answer rather than a second opinion here. A
- * source absent from `DESCRIPTION_SOURCE_ORDER` is never selected even when its fact would otherwise display, because
- * the ordered list is the whole rule.
+ * `mayDisplayFact` runs first, so a description that is expired, refused by its recorded policy, or unlicensed for the
+ * surface is not selectable — that function's answer is the rule rather than a second opinion here. A source absent from
+ * `DESCRIPTION_SOURCE_ORDER` is never selected even when its fact would otherwise display, because the ordered list is
+ * the whole rule.
+ *
+ * ## Staleness is the caller's decision, and it has consequences here
+ *
+ * Under the default `"refuse"` a stale description is not selectable and this returns `null`. Under `"label"` it *is*
+ * selectable, and a caller that opts in owes the traveller the label — `staleLabelIsRequired` answers that for the fact
+ * this returns. Passing `"label"` and rendering no label would present an unchecked sentence as a current one, which is
+ * the failure the refusal existed to prevent.
  *
  * Deterministic: the source order decides, and two facts from one source are broken by `id` so the same sidecar always
- * renders the same sentence.
+ * renders the same sentence. Note that a fresh description does not outrank a stale one — the source order is the only
+ * preference, so under `"label"` a stale Wikidata description still wins over a fresh one from a source not on the list,
+ * which is the same answer the list gives when nothing is stale at all.
  */
 export function selectDescription(
   facts: PlaceFact[],
@@ -182,6 +276,8 @@ export function selectDescription(
     surface: DisplaySurface;
     now: IsoTimestamp;
     conflicts?: FactConflict[];
+    /** Defaults to `"refuse"`. See `StaleDisplayMode`. */
+    staleness?: StaleDisplayMode;
   },
 ): PlaceFact | null {
   const candidates = facts

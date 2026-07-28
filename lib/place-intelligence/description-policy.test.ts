@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import { detectConflicts } from "./conflicts";
-import { selectDescription, DESCRIPTION_SOURCE_ORDER } from "./display-policy";
-import { factKindIsCorroboratable, factKindIsOperational } from "./facts";
+import {
+  mayDisplayFact,
+  selectDescription,
+  staleLabelIsRequired,
+  DESCRIPTION_SOURCE_ORDER,
+  STALE_LABELLABLE_FACT_KINDS,
+} from "./display-policy";
+import {
+  factKindIsCorroboratable,
+  factKindIsOperational,
+  FACT_VOLATILITY,
+} from "./facts";
 import { mergeIntelligence } from "./merge";
 import { fact, identity, sidecar, NOW } from "./test-fixtures";
 
@@ -34,6 +44,17 @@ const OTHER_DESCRIPTION = fact({
   kind: "official-description",
   value: "iron lattice tower on the Champ de Mars",
   provider: "mock",
+});
+
+/** Years past its check, and still almost certainly true — which is the whole reason the label mode exists. */
+const STALE_DESCRIPTION = fact({
+  kind: "official-description",
+  value: "tower in Paris, France",
+  provider: "wikidata",
+  provenance: {
+    ...WIKIDATA_DESCRIPTION.provenance,
+    retrievedAt: "2019-01-01T00:00:00.000Z",
+  },
 });
 
 describe("two descriptions neither corroborate nor conflict", () => {
@@ -186,19 +207,12 @@ describe("display selection uses an explicit source rule", () => {
     expect(selected).toBe(WIKIDATA_DESCRIPTION);
   });
 
-  it("selects nothing when the description is stale", () => {
-    /* `mayDisplayFact` answers the freshness question; this asserts the selector defers to it. */
-    const stale = fact({
-      kind: "official-description",
-      value: "tower in Paris, France",
-      provider: "wikidata",
-      provenance: {
-        ...WIKIDATA_DESCRIPTION.provenance,
-        retrievedAt: "2019-01-01T00:00:00.000Z",
-      },
-    });
-
-    expect(selectDescription([stale], shown)).toBeNull();
+  it("selects nothing when the description is stale and no mode was asked for", () => {
+    /*
+     * The default, pinned deliberately. `"refuse"` is what a caller gets by omission, so a new surface is strict until it
+     * says otherwise — the permissive path has to be visible at the call site.
+     */
+    expect(selectDescription([STALE_DESCRIPTION], shown)).toBeNull();
   });
 
   it("selects nothing when there is no description at all", () => {
@@ -208,5 +222,86 @@ describe("display selection uses an explicit source rule", () => {
         shown,
       ),
     ).toBeNull();
+  });
+});
+
+/**
+ * Staleness as a label rather than a refusal — the one exception in the directory.
+ *
+ * A description 40 days past its check is almost certainly still true, so refusing it removes correct information in
+ * exchange for nothing. Every test below guards one edge of the exception, because an opt-in that leaks is worse than no
+ * opt-in: it would make the permissive path the accidental default for kinds that must never take it.
+ */
+describe("a stale description may be labelled instead of refused", () => {
+  const labelled = {
+    surface: "in-app" as const,
+    now: NOW,
+    staleness: "label" as const,
+  };
+
+  it("selects the stale description and reports that a label is required", () => {
+    expect(selectDescription([STALE_DESCRIPTION], labelled)).toBe(
+      STALE_DESCRIPTION,
+    );
+    expect(staleLabelIsRequired(STALE_DESCRIPTION, labelled)).toBe(true);
+  });
+
+  it("requires no label for a description that is not stale", () => {
+    expect(selectDescription([WIKIDATA_DESCRIPTION], labelled)).toBe(
+      WIKIDATA_DESCRIPTION,
+    );
+    expect(staleLabelIsRequired(WIKIDATA_DESCRIPTION, labelled)).toBe(false);
+  });
+
+  it("requires no label under the default mode, because nothing stale was shown", () => {
+    /* `false` here is not "it is fresh" — it is "a stale fact never reached a screen to be labelled". */
+    expect(staleLabelIsRequired(STALE_DESCRIPTION, { now: NOW })).toBe(false);
+  });
+
+  it("still refuses a stale fact of any other kind under the same mode", () => {
+    /*
+     * The reason the mode is applied per *kind* inside the module rather than per call site: a surface opting in for its
+     * description passes the same option to every fact it renders, and a stale phone number shown as current sends
+     * somebody to a disconnected line.
+     */
+    const stalePhone = fact({
+      kind: "phone",
+      value: "+351 21 810 0340",
+      provider: "wikidata",
+      provenance: {
+        ...WIKIDATA_DESCRIPTION.provenance,
+        retrievedAt: "2019-01-01T00:00:00.000Z",
+      },
+    });
+
+    expect(STALE_LABELLABLE_FACT_KINDS.has("phone")).toBe(false);
+    expect(mayDisplayFact(stalePhone, labelled)).toBe("denied");
+    expect(staleLabelIsRequired(stalePhone, labelled)).toBe(false);
+  });
+
+  it("only ever admits durable kinds, so no mode can label a perishable one", () => {
+    /*
+     * Membership is asserted rather than assumed. Labelling a forecast "not checked recently" still presents it as
+     * describing now, and `factIsExpired` — which no mode softens — is what actually governs it.
+     */
+    for (const kind of STALE_LABELLABLE_FACT_KINDS) {
+      expect(FACT_VOLATILITY[kind], kind).toBe("durable");
+    }
+  });
+
+  it("does not let the label mode resurrect an expired description", () => {
+    /*
+     * Expiry and staleness are separate questions and only one has an exception. A `validUntil` in the past is a hard
+     * end: there is no caveat that makes a sentence about a demolished building useful.
+     */
+    const expired = fact({
+      kind: "official-description",
+      value: "tower in Paris, France",
+      provider: "wikidata",
+      validUntil: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(mayDisplayFact(expired, labelled)).toBe("denied");
+    expect(selectDescription([expired], labelled)).toBeNull();
   });
 });

@@ -87,6 +87,64 @@ export type EnrichmentPost = (
   signal: AbortSignal | undefined,
 ) => Promise<unknown>;
 
+/**
+ * What one user action has established so far, reported after each call whose response passed the contract.
+ *
+ * ## Why the workflow reports this rather than the caller counting
+ *
+ * A caller supplies `post` and could count its own invocations, which covers `call` — and nothing else. Everything about
+ * *places* is inside the response body, and the only place that body may be read is after
+ * `EnrichTripPlacesResponseSchema` has accepted it. A hook that opened the raw payload to count answers would be
+ * believing data the schema exists to gate, and it would believe it on exactly the responses the schema was written to
+ * reject.
+ *
+ * So progress is emitted from here, downstream of validation. Every number below is derived from outcomes that parsed.
+ *
+ * ## It reports the call that just finished, not the one about to start
+ *
+ * `call`, `requestedThisCall` and `phase` all describe the same completed call, so they read as one sentence: "call 2 of
+ * 3, having asked about 7 places, was a continuation". A field describing the *next* call would be a prediction, and the
+ * next call may not happen.
+ *
+ * ## Nothing here is a promise about what gets saved
+ *
+ * `matched` and the rest are running totals of what has been *answered*, and this module persists nothing. A caller that
+ * reported these as saved counts would be announcing a write that has not happened and may still be refused — the
+ * numbers a traveller is told afterwards come from the store's own result.
+ */
+export type EnrichmentWorkflowProgress = {
+  /** 1-based, and never above `maximumCalls`. */
+  call: number;
+  /** The ceiling in force for this run, so a reader can render "2 of 3" without importing the constant. */
+  maximumCalls: number;
+  /** How many places went out in this call. Shrinks across continuations as answers accumulate. */
+  requestedThisCall: number;
+  /**
+   * How many of the *requested* places now have an answer.
+   *
+   * Counted from the requested set rather than from the accumulated answers, so an outcome for a place nobody asked about
+   * cannot push this above `total`. A progress bar reading 13 of 12 is a bug report from a traveller.
+   */
+  checked: number;
+  /** The de-duplicated place count for the whole action. Constant across every emission of one run. */
+  total: number;
+  matched: number;
+  unmatched: number;
+  review: number;
+  failed: number;
+  /**
+   * Places Roamly still cannot say anything about: no outcome yet, plus `failed` outcomes.
+   *
+   * The same definition `EnrichmentWorkflowResult.unresolved` uses, deliberately — a progress line and a final line that
+   * counted differently would look like the last call had undone something.
+   */
+  unresolved: number;
+  /** Only the places with no outcome at all. A fresh array per emission, safe for a listener to retain. */
+  remainingPlaceIds: string[];
+  /** `"checking"` for the first call, `"continuing"` for every one after it. */
+  phase: "checking" | "continuing";
+};
+
 export async function runEnrichmentWorkflow(input: {
   places: readonly TripPlace[];
   expectedRevision: number;
@@ -96,6 +154,13 @@ export async function runEnrichmentWorkflow(input: {
   signal?: AbortSignal;
   /** Lowered by tests. Raised by nothing — the ceiling is the guarantee. */
   maxCalls?: number;
+  /**
+   * Called once per call whose response passed the contract, never for one that failed or was aborted.
+   *
+   * Optional, and the workflow behaves identically without it: it reports, it never decides. A listener cannot change
+   * how many calls are made, which places go out next, or what may be persisted.
+   */
+  onProgress?: (progress: EnrichmentWorkflowProgress) => void;
 }): Promise<EnrichmentWorkflowResult> {
   const maxCalls = Math.max(1, input.maxCalls ?? MAX_ENRICHMENT_CALLS);
 
@@ -169,6 +234,21 @@ export async function runEnrichmentWorkflow(input: {
       }
     }
 
+    /*
+     * Reported here — after the fold, before the stop is decided.
+     *
+     * After the fold, because these numbers describe what is now known. Before the stop, because a call that ends the run
+     * still established something: a `budget_exhausted` response that answered four places, or a `rate_limited` one that
+     * answered two, are exactly the partial results a traveller should see accounted for rather than discarded.
+     */
+    report(input.onProgress, {
+      byPlaceId,
+      answered,
+      call: calls,
+      maximumCalls: maxCalls,
+      requestedThisCall: pending.length,
+    });
+
     const abandoned = parsed.data.abandoned;
 
     if (!abandoned) {
@@ -205,32 +285,130 @@ export async function runEnrichmentWorkflow(input: {
     }
   }
 
+  const final = tally(byPlaceId, answered);
+
+  return {
+    outcomes: final.outcomes,
+    matched: final.matched,
+    unresolved: final.unresolvedPlaceIds.length,
+    unresolvedPlaceIds: final.unresolvedPlaceIds,
+    calls,
+    stop,
+    expectedRevision: input.expectedRevision,
+  };
+}
+
+/**
+ * One pass over the requested places, producing every count both the progress line and the final report need.
+ *
+ * Shared rather than duplicated because the two must agree. A progress emission that counted `unresolved` one way and a
+ * result that counted it another would surface as a number moving on its own after the last call — and the version a
+ * reader would trust is whichever they happened to look at.
+ *
+ * Iterates the *requested* places, so order is itinerary order and an outcome for a place nobody asked about contributes
+ * to nothing. Every array is freshly allocated, which is what makes a retained `remainingPlaceIds` safe.
+ */
+function tally(
+  byPlaceId: Map<string, TripPlace>,
+  answered: Map<string, EnrichOutcome>,
+): {
+  outcomes: EnrichOutcome[];
+  /** No outcome at all. */
+  remainingPlaceIds: string[];
+  /** No outcome at all, plus `failed`. */
+  unresolvedPlaceIds: string[];
+  matched: number;
+  unmatched: number;
+  review: number;
+  failed: number;
+} {
   const outcomes: EnrichOutcome[] = [];
+  const remainingPlaceIds: string[] = [];
   const unresolvedPlaceIds: string[] = [];
   let matched = 0;
+  let unmatched = 0;
+  let review = 0;
+  let failed = 0;
 
   for (const placeId of byPlaceId.keys()) {
     const outcome = answered.get(placeId);
 
     if (!outcome) {
+      remainingPlaceIds.push(placeId);
       unresolvedPlaceIds.push(placeId);
       continue;
     }
 
     outcomes.push(outcome);
-    if (outcome.status === "matched") matched += 1;
-    if (outcome.status === "failed") unresolvedPlaceIds.push(placeId);
+    switch (outcome.status) {
+      case "matched":
+        matched += 1;
+        break;
+      case "unmatched":
+        unmatched += 1;
+        break;
+      case "review":
+        review += 1;
+        break;
+      case "failed":
+        failed += 1;
+        unresolvedPlaceIds.push(placeId);
+        break;
+    }
   }
 
   return {
     outcomes,
-    matched,
-    unresolved: unresolvedPlaceIds.length,
+    remainingPlaceIds,
     unresolvedPlaceIds,
-    calls,
-    stop,
-    expectedRevision: input.expectedRevision,
+    matched,
+    unmatched,
+    review,
+    failed,
   };
+}
+
+/**
+ * Hands one emission to the listener, if there is one.
+ *
+ * A throwing listener is caught and ignored, which is the one deliberate swallow in this module. The alternative is
+ * worse: progress reporting is decoration, and letting a misbehaving reporter propagate would discard a run's validated
+ * answers — turning "the progress line crashed" into "the enrichment you waited for was thrown away". Nothing downstream
+ * depends on the listener having run, so there is no state to repair and nothing for a caller to do about it.
+ */
+function report(
+  onProgress: ((progress: EnrichmentWorkflowProgress) => void) | undefined,
+  input: {
+    byPlaceId: Map<string, TripPlace>;
+    answered: Map<string, EnrichOutcome>;
+    call: number;
+    maximumCalls: number;
+    requestedThisCall: number;
+  },
+): void {
+  if (!onProgress) return;
+
+  const counts = tally(input.byPlaceId, input.answered);
+  const total = input.byPlaceId.size;
+
+  try {
+    onProgress({
+      call: input.call,
+      maximumCalls: input.maximumCalls,
+      requestedThisCall: input.requestedThisCall,
+      checked: total - counts.remainingPlaceIds.length,
+      total,
+      matched: counts.matched,
+      unmatched: counts.unmatched,
+      review: counts.review,
+      failed: counts.failed,
+      unresolved: counts.unresolvedPlaceIds.length,
+      remainingPlaceIds: counts.remainingPlaceIds,
+      phase: input.call === 1 ? "checking" : "continuing",
+    });
+  } catch {
+    /* See above. A reporter cannot cost a traveller their results. */
+  }
 }
 
 /**

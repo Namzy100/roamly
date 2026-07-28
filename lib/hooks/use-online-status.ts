@@ -61,6 +61,7 @@ export const PROVIDER_BACKED_ACTIONS = [
   "route",
   "refine",
   "refresh-pool",
+  "enrich-landmarks",
 ] as const;
 export type ProviderBackedAction = (typeof PROVIDER_BACKED_ACTIONS)[number];
 
@@ -76,5 +77,11 @@ export function offlineReasonFor(action: ProviderBackedAction): string {
       return "This change needs a connection to the planner.";
     case "refresh-pool":
       return "Refreshing the available places needs a connection to OpenStreetMap.";
+    case "enrich-landmarks":
+      /*
+       * Names both services, because they are two separate volunteer projects and a traveller who recognises one may not
+       * recognise the other. "Landmark photos and context" rather than "enrichment", which is our word and not theirs.
+       */
+      return "Adding landmark photos and context needs a connection to Wikidata and Wikimedia Commons.";
   }
 }
