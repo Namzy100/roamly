@@ -98,3 +98,71 @@ export function factIsExpired(fact: PlaceFact, now: IsoTimestamp): boolean {
 export function factIsUsable(fact: PlaceFact, now: IsoTimestamp): boolean {
   return !factIsExpired(fact, now) && !factIsStale(fact, now);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Landmark enrichment TTLs (Checkpoint 5B, section 11)                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * How long each part of a landmark lookup stays trustworthy, and what happens when it stops.
+ *
+ * ## Why these are not `STALENESS_LIMIT_MS` entries
+ *
+ * That table is keyed by *volatility*, which answers "when does a value stop being true". Three of the four things
+ * below are not fact values at all — an identity is a *link*, media metadata is a *licence claim*, and a thumbnail URL
+ * is a *rendered artefact*. They go stale for unrelated reasons, on unrelated schedules, and with different
+ * consequences. Folding them into a volatility table would mean giving a URL a volatility, which is a category error
+ * that only surfaces when a photograph disappears for the wrong reason.
+ *
+ * ## The four, and why each number is what it is
+ *
+ * Each carries a stated **consequence**, because "how long is it good for" is only half the question:
+ *
+ *  - **`externalIdentity` — 365 days, never gates display.** A QID is a permanent identifier; Wikidata merges and
+ *    redirects entities but does not silently repoint one at a different place. An old identity is worth re-checking
+ *    and is not grounds for hiding anything: an identity that has gone wrong is a *wrong match*, which is what
+ *    `matchIsTrusted` and human review are for, not something a clock can detect.
+ *  - **`officialDescription` — 30 days, shows with a label.** Matches the existing `durable` interval, because a
+ *    Wikidata description changes on the scale of a rebuild or a change of use. Past it the sentence is still almost
+ *    certainly true, so refusing it would remove correct information; the honest treatment is to show it and say it
+ *    has not been checked lately. This is the one place in the directory where staleness is a *label* rather than a
+ *    refusal, and `mayDisplayFact` requires an explicit opt-in to behave that way.
+ *  - **`mediaMetadata` — 180 days, never gates display.** A licence grant does not lapse. A CC BY-SA 3.0 file
+ *    licensed in 2011 is still licensed under it today, and hiding a photograph because the paperwork was last checked
+ *    seven months ago would refuse a permission that is still in force. Long, therefore, and advisory: what it buys is
+ *    picking up a corrected credit on the next explicit refresh.
+ *  - **`thumbnailUrl` — 30 days, omits the image.** The one hard expiry. A Commons thumbnail URL points at a *derived
+ *    rendering*, not at the file: Wikimedia regenerates thumbnails, and a stored URL that once worked can return 404.
+ *    A broken image is worse than no image, so past this the photograph is omitted while the description and facts
+ *    beside it are untouched.
+ *
+ * ## No polling, at any of these intervals
+ *
+ * None of these is a timer. Nothing schedules a refresh, nothing refreshes on trip open, and nothing refreshes in the
+ * background — an interval here would turn a volunteer-funded service into a subscription nobody asked permission for.
+ * They are read at *render* time to decide what to show, and at *refresh* time to decide what an explicit user action
+ * should ask about again. An elapsed TTL changes what a card looks like; it never causes a request.
+ */
+export const LANDMARK_TTL_MS = {
+  externalIdentity: 365 * 24 * 60 * 60 * 1_000,
+  officialDescription: 30 * 24 * 60 * 60 * 1_000,
+  mediaMetadata: 180 * 24 * 60 * 60 * 1_000,
+  thumbnailUrl: 30 * 24 * 60 * 60 * 1_000,
+} as const satisfies Record<string, number>;
+
+/**
+ * Whether a recorded moment is older than one of the TTLs above.
+ *
+ * An unparseable timestamp counts as elapsed, for the reason `factIsStale` treats one as stale: a moment we cannot
+ * read is not evidence of freshness, and treating it as fresh would make a corrupt record the longest-lived one.
+ */
+export function ttlElapsed(input: {
+  since: IsoTimestamp;
+  now: IsoTimestamp;
+  ttlMs: number;
+}): boolean {
+  const since = Date.parse(input.since);
+  const now = Date.parse(input.now);
+  if (!Number.isFinite(since) || !Number.isFinite(now)) return true;
+  return now - since > input.ttlMs;
+}

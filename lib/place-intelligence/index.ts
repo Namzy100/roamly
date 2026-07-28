@@ -92,6 +92,8 @@ export {
   factIsExpired,
   factIsStale,
   factIsUsable,
+  ttlElapsed,
+  LANDMARK_TTL_MS,
   STALENESS_LIMIT_MS,
 } from "./freshness";
 
@@ -181,6 +183,22 @@ export {
   type WikidataMatchOutcome,
   type WikipediaReference,
 } from "./wikidata-identity";
+
+/**
+ * What a landmark card may show (Checkpoint 5B, section 10A).
+ *
+ * A *consumer* of `display-policy` rather than a second opinion: every refusal it makes is `mayDisplayFact`,
+ * `mayDisplayMedia` or `selectDescription` answering, with the landmark-specific gates — the right place, an eligible
+ * category, a trusted match — layered on top.
+ */
+export {
+  deriveLandmarkCardIntelligence,
+  LANDMARK_CARD_FACT_KINDS,
+  LANDMARK_CARD_FACT_LABELS,
+  type LandmarkCardFact,
+  type LandmarkCardIntelligence,
+  type LandmarkCardPhoto,
+} from "./landmark-card";
 
 export {
   intelligenceIsValid,
