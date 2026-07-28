@@ -93,7 +93,25 @@ export type IsoTimestamp = string;
  */
 export type LicenceId =
   | "CC0-1.0"
+  /*
+   * Every Creative Commons version Wikimedia Commons commonly carries, named exactly.
+   *
+   * The 2.x and 3.0 entries were added when the Commons adapter was implemented, because a closed table holding only
+   * 4.0 refused a large share of the library — including most photographs uploaded before 2014.
+   *
+   * They are separate members rather than a `CC-BY` family, and that is the load-bearing part: the versions differ in
+   * their attribution wording, in whether the licence URI must be included, and in how a port relates to the
+   * unported text. Mapping a 3.0 file onto `CC-BY-SA-4.0` would put a false licence statement into a record whose
+   * whole purpose is to make licence claims checkable, so no version is ever remapped onto another — a file whose
+   * version cannot be established stays `unknown`, and `unknown` is refused.
+   */
+  | "CC-BY-2.0"
+  | "CC-BY-2.5"
+  | "CC-BY-3.0"
   | "CC-BY-4.0"
+  | "CC-BY-SA-2.0"
+  | "CC-BY-SA-2.5"
+  | "CC-BY-SA-3.0"
   | "CC-BY-SA-4.0"
   | "ODbL-1.0"
   | "public-domain"

@@ -1,10 +1,12 @@
 import { z } from "zod";
 
+import { importRejections } from "@/lib/place-intelligence";
 import { validatePlanMembership } from "@/lib/structural-edits";
 import { TRIP_PLAN_SCHEMA_VERSION } from "@/lib/schemas";
 
 import { EMPTY_HISTORY } from "./history";
 import { TripRecordSchema, type StoredTripRecord } from "./trip-record";
+import { sidecarForExport } from "./trip-intelligence";
 
 /**
  * Exporting and importing a saved trip as JSON.
@@ -76,7 +78,18 @@ export function exportTrip(
     formatVersion: PORTABLE_TRIP_FORMAT,
     exportedAt,
     planSchemaVersion: TRIP_PLAN_SCHEMA_VERSION,
-    record: TripRecordSchema.parse(record),
+    /*
+     * Enrichment is held to the **export** standard, not the persistence one.
+     *
+     * `persistence-policy.ts` draws the distinction: an exported file leaves any deletion mechanism Roamly controls, so
+     * a fact that may sit in `localStorage` may still not be written into a file the traveller could publish.
+     * `sidecarForExport` strips rather than refuses, which is the right direction on the way out — the traveller asked
+     * for their trip, and the trip is exportable even when some enrichment is not.
+     */
+    record: TripRecordSchema.parse({
+      ...record,
+      intelligence: sidecarForExport(record.intelligence),
+    }),
   };
 }
 
@@ -188,6 +201,28 @@ export function parseImportedTrip(text: string): ImportResult {
    * would be a way around the invariant the architecture rests on.
    */
   const record = parsed.data.record;
+
+  /*
+   * An imported sidecar is **refused** rather than stripped.
+   *
+   * The opposite of the export direction, and `persistence-policy.ts` explains why: on the way out Roamly controls what
+   * is written and can make it correct, where on the way in the file already exists — and containing something
+   * unexportable means it was produced by something that ignored this policy. Quietly cleaning it would hide that,
+   * which is also the only way a bug in an exporter ever gets noticed.
+   */
+  if (record.intelligence) {
+    const rejections = importRejections(
+      Object.values(record.intelligence.byCanonicalPlaceId),
+    );
+    if (rejections.length > 0) {
+      return {
+        ok: false,
+        code: "invalid_record",
+        message: `That trip's enrichment could not be accepted, so nothing was imported: ${rejections[0].reason}`,
+      };
+    }
+  }
+
   if (record.generation) {
     const issues = validatePlanMembership({
       plan: record.plan,
@@ -231,5 +266,13 @@ export function asImportedCopy(
     generation: trip.record.generation,
     /** A copy starts fresh: the original's history describes edits to a trip this one is not. */
     history: EMPTY_HISTORY,
+    /*
+     * Enrichment travels with the copy, unlike the history.
+     *
+     * The history describes edits to a trip this copy is not, so it is dropped. Enrichment describes the *places*, and
+     * the copy keeps every place's canonical id — so the sidecar's keys still resolve, and re-fetching a monastery's
+     * founding date would be a request to a volunteer service for something already in the file.
+     */
+    intelligence: trip.record.intelligence,
   };
 }

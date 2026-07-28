@@ -39,6 +39,19 @@ import {
   type SaveConflict,
   type StoredTripRecord,
 } from "./trip-record";
+import {
+  PlaceIntelligenceSchema,
+  type PlaceIntelligence,
+} from "@/lib/place-intelligence";
+
+import {
+  countMatchedEntries,
+  putIntelligence,
+  reconcileTripIntelligence,
+  sameIntelligenceContent,
+  type SaveTripIntelligenceInput,
+  type SaveTripIntelligenceResult,
+} from "./trip-intelligence";
 
 /**
  * Persisted trip state.
@@ -170,6 +183,25 @@ type TripStoreState = {
     expectedRevision: number;
     plan: TripPlan;
   }) => GuardedSaveResult;
+  /**
+   * The landmark sidecar, written once at the end of a bounded enrichment workflow.
+   *
+   * Guarded and atomic like every other write here, and deliberately **not** part of the undo history: enrichment adds
+   * provider facts and takes nothing away, so stepping back over it would discard real lookups in exchange for nothing —
+   * the reasoning routing is outside the history for.
+   *
+   * Its own result type rather than `GuardedSaveResult`, because it has an answer the others do not: `unchanged`, for a
+   * refresh that produced exactly what is already stored. Reporting that as a save would consume a revision and tell the
+   * traveller their trip changed when it did not.
+   */
+  saveTripIntelligence: (
+    input: SaveTripIntelligenceInput,
+  ) => SaveTripIntelligenceResult;
+  /** Drops the whole sidecar. Separate, guarded and atomic — forgetting enrichment is its own decision. */
+  clearTripIntelligence: (input: {
+    tripId: string;
+    expectedRevision: number;
+  }) => SaveTripIntelligenceResult;
   removeTrip: (tripId: string) => void;
   clearAll: () => void;
   /**
@@ -595,6 +627,129 @@ export const useTripStore = create<TripStoreState>()(
         set({ records: room.records });
 
         return { ok: true, revision: updated.revision };
+      },
+
+      saveTripIntelligence: ({
+        tripId,
+        expectedRevision,
+        entries,
+        fetchedAt,
+      }) => {
+        const current = get().records[tripId];
+        if (!current) return { status: "missing-trip" };
+
+        const conflict = checkRevision(current, expectedRevision);
+        if (conflict) {
+          return { status: "conflict", actualRevision: current.revision };
+        }
+
+        if (!Number.isFinite(Date.parse(fetchedAt))) {
+          return {
+            status: "invalid",
+            reason: "The enrichment timestamp is not a usable date.",
+          };
+        }
+
+        /*
+         * Re-validated at the boundary, entry by entry.
+         *
+         * These crossed an API and a JSON round trip to get here, and this is the last point before they become the
+         * saved truth — the same reason `saveEnrichedPlan` re-parses its plan. One bad entry refuses the whole write
+         * rather than being dropped: a caller handing over something unparseable has a bug, and silently storing the
+         * rest would hide it behind a partially enriched trip.
+         */
+        const parsed: PlaceIntelligence[] = [];
+        for (const entry of entries) {
+          const result = PlaceIntelligenceSchema.safeParse(entry);
+          if (!result.success) {
+            return {
+              status: "invalid",
+              reason:
+                "One of the enrichment records did not pass validation, so nothing was saved.",
+            };
+          }
+          parsed.push(result.data);
+        }
+
+        /*
+         * Merge, then reconcile against the trip as it stands.
+         *
+         * Reconciliation runs on the way *in* as well as after an edit, because the plan may have changed while the
+         * enrichment requests were in flight — a traveller can remove a stop during a ninety-second run, and storing an
+         * entry for a place the trip no longer owns would be storing something no reader could reach.
+         */
+        const merged = putIntelligence(current.intelligence, parsed, fetchedAt);
+        const reconciled = reconcileTripIntelligence({
+          intelligence: merged,
+          plan: current.plan,
+          generationContext: current.generation,
+        });
+
+        if (sameIntelligenceContent(current.intelligence, reconciled)) {
+          /* Nothing new. No revision consumed, no write, and the caller is told so rather than told "saved". */
+          return { status: "unchanged", revision: current.revision };
+        }
+
+        /*
+         * `nextRevision` with the plan unchanged and no history entry.
+         *
+         * The default `"keep"` is what leaves the undo stack alone. The plan is passed through as-is because enrichment
+         * cannot touch it — this action has no way to produce a plan, which is the enforcement rather than the intent.
+         */
+        const updated: StoredTripRecord = {
+          ...nextRevision(current, current.plan, new Date().toISOString()),
+          intelligence: reconciled,
+        };
+
+        const records = { ...get().records, [tripId]: updated };
+        const room = reserve(records, get().lastRequest, tripId);
+        if (!room.ok) {
+          return { status: "storage-refused", reason: room.storage.message };
+        }
+
+        /* One atomic replacement. There is no state in which the trip is half-enriched. */
+        set({ records: room.records });
+
+        return {
+          status: "saved",
+          revision: updated.revision,
+          matched: countMatchedEntries(reconciled),
+        };
+      },
+
+      clearTripIntelligence: ({ tripId, expectedRevision }) => {
+        const current = get().records[tripId];
+        if (!current) return { status: "missing-trip" };
+
+        const conflict = checkRevision(current, expectedRevision);
+        if (conflict) {
+          return { status: "conflict", actualRevision: current.revision };
+        }
+
+        if (!current.intelligence) {
+          return { status: "unchanged", revision: current.revision };
+        }
+
+        const updated: StoredTripRecord = {
+          ...nextRevision(current, current.plan, new Date().toISOString()),
+          intelligence: null,
+        };
+
+        const records = { ...get().records, [tripId]: updated };
+        /*
+         * Reserved even though this only ever frees room.
+         *
+         * The check is cheap and the alternative is a special case: a write that skipped the reservation because it
+         * "obviously fits" is a write nobody would think to revisit if the record ever grew for another reason.
+         */
+        const room = reserve(records, get().lastRequest, tripId);
+        if (!room.ok) {
+          return { status: "storage-refused", reason: room.storage.message };
+        }
+
+        set({ records: room.records });
+
+        return { status: "saved", revision: updated.revision, matched: 0 };
       },
 
       removeTrip: (tripId) =>

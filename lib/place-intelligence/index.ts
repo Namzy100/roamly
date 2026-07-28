@@ -53,6 +53,7 @@ export {
 
 export {
   factId,
+  factKindIsCorroboratable,
   factKindIsOperational,
   factKindIsRefused,
   FACT_VOLATILITY,
@@ -143,6 +144,8 @@ export {
   mayDisplayFact,
   mayDisplayMedia,
   requiredAttributions,
+  selectDescription,
+  DESCRIPTION_SOURCE_ORDER,
   REQUIRED_ATTRIBUTION,
   type DisplaySurface,
 } from "./display-policy";

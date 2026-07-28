@@ -25,7 +25,20 @@ import "server-only";
  * collects.
  */
 
-export type ProviderCategory = "geocode" | "places" | "routing" | "model";
+export type ProviderCategory =
+  | "geocode"
+  | "places"
+  | "routing"
+  | "model"
+  /**
+   * Landmark enrichment — Wikidata and Wikimedia Commons.
+   *
+   * A category of its own rather than folded into `places`, because the two answer different operational
+   * questions: `places` failing means a traveller got no search results, and enrichment failing means a
+   * photograph is missing. Sharing a category would make a healthy search look degraded every time WDQS was
+   * under load.
+   */
+  | "place-intelligence";
 
 export type ResultCategory =
   | "ok"

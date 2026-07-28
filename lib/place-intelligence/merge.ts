@@ -1,7 +1,11 @@
 import type { PlaceIntelligence } from "./canonical";
 import { detectConflicts, disputedKinds } from "./conflicts";
 import { matchIsTrusted, type ExternalIdentity } from "./external-identity";
-import { factKindIsRefused, type PlaceFact } from "./facts";
+import {
+  factKindIsCorroboratable,
+  factKindIsRefused,
+  type PlaceFact,
+} from "./facts";
 import type { PlaceMedia } from "./media";
 
 /**
@@ -236,11 +240,23 @@ function markConfidence(facts: PlaceFact[]): PlaceFact[] {
       return { ...fact, confidence: "disputed" as const };
     }
 
+    /*
+     * Two sources are evidence for most kinds, and not for all of them.
+     *
+     * `factKindIsCorroboratable` names the exceptions. A description is the one today: two providers wording one
+     * differently is not disagreement, and two wording it identically usually means one copied the other, so neither
+     * case supports an upgrade. Without this check, such a kind would get corroboration without ever being subject to
+     * conflict detection — the promotion with none of the contest.
+     */
     const independent = providersByKind.get(fact.kind)?.size ?? 1;
+    const corroborated =
+      independent >= 2 && factKindIsCorroboratable(fact.kind);
+
     return {
       ...fact,
-      confidence:
-        independent >= 2 ? ("corroborated" as const) : ("reported" as const),
+      confidence: corroborated
+        ? ("corroborated" as const)
+        : ("reported" as const),
     };
   });
 }

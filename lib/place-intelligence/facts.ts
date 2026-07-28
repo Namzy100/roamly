@@ -53,6 +53,30 @@ export type PlaceFactKind =
   | "wikidata-id"
   | "inception-year"
   | "heritage-status"
+  /**
+   * A source's own one-line factual description of the place.
+   *
+   * ## Why this is not `editorial-summary`
+   *
+   * They look like the same field and are opposites. `editorial-summary` is Google Atmosphere-tier *written* content —
+   * uncacheable, unpersistable, and refused by name. This is Wikidata's `description`: a structural disambiguator that
+   * exists so an editor can tell `Q243` from every other thing called "Eiffel Tower", and which reads
+   * "tower in Paris, France". CC0, factual, and short by construction.
+   *
+   * Adding a kind rather than reusing one was the choice with the fewest bad consequences. Reusing
+   * `editorial-summary` would have meant a refused kind arriving through the merge, which is the one thing
+   * `factKindIsRefused` exists to prevent — so the refusal would have had to be weakened for every provider at once,
+   * including Google.
+   *
+   * ## What may be in it, and what may not
+   *
+   * A source's own short description, verbatim. No rewriting, no model output, no assembled prose, and nothing that
+   * reads as a recommendation — the adapter that produces one checks its text against a prohibited-phrase list, and
+   * the value stays in the source's language.
+   *
+   * The canonical *name* remains OpenStreetMap's. This is what a place is, never what it is called.
+   */
+  | "official-description"
   /* -- perishable ---------------------------------------------------------- */
   | "weather-forecast"
   | "live-busyness"
@@ -84,6 +108,8 @@ export const FACT_VOLATILITY: Record<PlaceFactKind, FactVolatility> = {
   "wikidata-id": "durable",
   "inception-year": "durable",
   "heritage-status": "durable",
+  /* What a place *is* changes on the scale of a rebuild or a change of use, not of a season. */
+  "official-description": "durable",
   "weather-forecast": "perishable",
   "live-busyness": "perishable",
   "temporary-closure": "scheduled",
@@ -129,8 +155,51 @@ export const OPERATIONAL_FACT_KINDS: ReadonlySet<PlaceFactKind> =
     "heritage-status",
   ]);
 
+/*
+ * `official-description` is deliberately **not** in that set.
+ *
+ * Two sources wording a description differently is not an operational problem. "tower in Paris, France" and "iron
+ * lattice tower on the Champ de Mars" are both true, and a traveller shown "sources disagree, check before relying on
+ * it" would be warned about nothing — where the same banner over contested opening hours is exactly what somebody
+ * standing at a door needs.
+ *
+ * Opening hours, business status, phone, address and website stay operational for that reason: each is a fact a
+ * traveller acts on, and being wrong about one wastes a journey.
+ */
+
 export function factKindIsOperational(kind: PlaceFactKind): boolean {
   return OPERATIONAL_FACT_KINDS.has(kind);
+}
+
+/**
+ * Kinds where two sources reporting the same value is *evidence*, and the one kind where it is not.
+ *
+ * ## Why leaving a kind out of the operational set is not enough
+ *
+ * `merge.ts` promotes a fact to `corroborated` whenever two providers supplied its kind, and it marks a fact `disputed`
+ * from `detectConflicts` — which only examines operational kinds. So a kind that is merely non-operational gets the
+ * *promotion* without the *contest*: two sources describing a place differently would come out marked as corroborating
+ * each other, which is an assertion neither source made and more confidence than a single description would carry.
+ *
+ * This predicate closes that gap. A description stays `reported` however many sources supply one, so the honest floor
+ * applies: each provider said so, and Roamly is repeating it.
+ *
+ * ## Why not corroboratable, specifically
+ *
+ * Corroboration means two sources independently measured the same thing and agreed. Two prose descriptions matching
+ * usually means one copied the other — Wikidata's descriptions are widely mirrored — so identical text is weaker
+ * evidence than it looks, and differing text is not disagreement at all. Neither case supports a confidence upgrade.
+ *
+ * Kept as an exclusion list rather than an inclusion one, so a new fact kind is corroboratable by default and only an
+ * explicit decision removes it. The alternative would make an omission silently suppress corroboration for a kind where
+ * agreement is real evidence.
+ */
+const NOT_CORROBORATABLE: ReadonlySet<PlaceFactKind> = new Set<PlaceFactKind>([
+  "official-description",
+]);
+
+export function factKindIsCorroboratable(kind: PlaceFactKind): boolean {
+  return !NOT_CORROBORATABLE.has(kind);
 }
 
 /**

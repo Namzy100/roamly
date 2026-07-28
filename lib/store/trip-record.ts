@@ -17,6 +17,10 @@ import {
   type TripHistoryEntry,
   type TripHistoryKind,
 } from "./history";
+import {
+  TripPlaceIntelligenceSidecarSchema,
+  type TripPlaceIntelligenceSidecar,
+} from "./trip-intelligence";
 
 /**
  * The stored envelope around a plan.
@@ -98,8 +102,33 @@ export const TripRecordSchema = z.object({
    * exchange for nothing.
    */
   history: TripHistorySchema,
+  /**
+   * Landmark enrichment from Wikidata and Wikimedia Commons (Phase 8, Checkpoint 5B).
+   *
+   * ## Why it is in the envelope
+   *
+   * The same argument the generation context is here for. Enrichment is a fact about a *run* rather than about the
+   * trip, and it must not become a field on `TripPlace` — `assertItineraryUsesPool` compares those field by field, so
+   * an enrichment refreshing on its own schedule would read as tampering. Keyed by `canonicalPlaceId` in a sidecar, it
+   * refreshes independently and the verified places stay byte-stable.
+   *
+   * Putting it in the envelope also means the single `revision` covers the pair: a guarded write replaces the plan and
+   * its enrichment together, or neither.
+   *
+   * ## Nullable and defaulted, not a version bump
+   *
+   * `.nullable().default(null)`, exactly as `generation` was added. A record saved before this checkpoint parses
+   * unchanged and reports "no enrichment", which is true. Discarding everyone's saved trips to add an optional
+   * sidecar would be a cost with no compatibility benefit.
+   *
+   * The sidecar carries its **own** `schemaVersion`, so a change to what enrichment means can invalidate the sidecar
+   * without invalidating the trip — see `trip-intelligence.ts`. Dropping enrichment leaves a working, licence-clean
+   * trip, which is what makes that safe.
+   */
+  intelligence: TripPlaceIntelligenceSidecarSchema.nullable().default(null),
 });
 export type StoredTripRecord = z.infer<typeof TripRecordSchema>;
+export type { TripPlaceIntelligenceSidecar };
 
 /**
  * The Phase 6A shape, kept only so its saved records can be read once and converted.
@@ -204,6 +233,8 @@ function fromLegacy(
           future: [],
         }
       : EMPTY_HISTORY,
+    /* A v2 record predates enrichment entirely, so there is nothing to carry across. */
+    intelligence: null,
   };
 }
 
@@ -220,6 +251,8 @@ export function createTripRecord(
     generation,
     // A brand-new trip has nothing to go back to.
     history: EMPTY_HISTORY,
+    /* Enrichment is a later, separate, serial pass. A trip is complete without it. */
+    intelligence: null,
   };
 }
 
@@ -274,6 +307,18 @@ export function nextRevision(
               ? { generationContext: record.generation }
               : {}),
           }),
+    /*
+     * Enrichment is carried forward, never revised here.
+     *
+     * The same treatment routing gets, for the same reason: enrichment adds provider facts and takes nothing away, so
+     * an edit to the itinerary has nothing to say about a monastery's founding date. A write that genuinely replaces
+     * enrichment goes through `putIntelligence` and then this function, which is a visible two-step rather than a
+     * silent side effect of every save.
+     *
+     * A stop removed by an edit leaves its entry behind until `reconcileTripIntelligence` is called — bounded by the
+     * sidecar's own twelve-entry cap in the meantime.
+     */
+    intelligence: record.intelligence,
   };
 }
 
@@ -305,6 +350,14 @@ export function withRestoredState(
     plan: restored.plan,
     generation: restored.generation,
     history,
+    /*
+     * Undo does not revert enrichment.
+     *
+     * Routing is outside the history for the Phase 6A reason — undoing a route calculation would discard real
+     * measurements in exchange for nothing — and enrichment is the same shape. A traveller stepping back a reorder is
+     * not asking to forget which Wikidata entity a museum is.
+     */
+    intelligence: record.intelligence,
   };
 }
 

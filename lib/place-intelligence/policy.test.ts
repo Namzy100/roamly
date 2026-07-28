@@ -570,6 +570,8 @@ describe("the existing OSM-only portable trip is unaffected", () => {
       plan: fixtureSavedPlan(),
       generation: FIXTURE_GENERATION,
       history: { past: [], future: [] },
+      /* No enrichment, which is the whole point of this case: the sidecar must not touch the canonical record. */
+      intelligence: null,
     };
 
     const exported = exportTrip(record, "2026-07-28T12:00:00.000Z");

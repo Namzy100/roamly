@@ -136,6 +136,74 @@ export function mayDisplayMedia(
   return "granted";
 }
 
+/* -------------------------------------------------------------------------- */
+/* Choosing which description to show                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The sources whose description may be displayed, most preferred first.
+ *
+ * One entry, and the length is the point. Descriptions are the one fact kind where two sources produce two *equally
+ * true* answers, so there is no conflict to surface and no corroboration to derive — which leaves the question "which
+ * one does a traveller see?" unanswered by every other mechanism in this directory.
+ *
+ * An ordered list answers it explicitly. Wikidata is on it because its description is a structural disambiguator: CC0,
+ * factual, short by construction, and written to tell one entity from another rather than to sell a visit.
+ *
+ * **A second entry is a decision, not a configuration change.** Adding one means choosing whose wording wins for every
+ * place at once, under a rule nobody has written yet — so the list stays at one until that rule exists, and this comment
+ * is where the next person finds out that it does not.
+ */
+export const DESCRIPTION_SOURCE_ORDER: readonly ProviderId[] = ["wikidata"];
+
+/**
+ * The one description to render, or none.
+ *
+ * ## Selection, never composition
+ *
+ * Returns a single existing fact. Nothing here concatenates two descriptions, averages them, picks the longer, or
+ * merges their wording — every one of those produces a sentence no source wrote, attributed to sources that did not
+ * write it. `conflicts.ts` refuses to invent a winner for contested hours for the same reason; this refuses to invent a
+ * description at all.
+ *
+ * ## Every ordinary display gate still applies
+ *
+ * `mayDisplayFact` runs first, so a description that is stale, refused by its recorded policy, or unlicensed for the
+ * surface is not selectable — "valid and non-stale" is that function's answer rather than a second opinion here. A
+ * source absent from `DESCRIPTION_SOURCE_ORDER` is never selected even when its fact would otherwise display, because
+ * the ordered list is the whole rule.
+ *
+ * Deterministic: the source order decides, and two facts from one source are broken by `id` so the same sidecar always
+ * renders the same sentence.
+ */
+export function selectDescription(
+  facts: PlaceFact[],
+  input: {
+    surface: DisplaySurface;
+    now: IsoTimestamp;
+    conflicts?: FactConflict[];
+  },
+): PlaceFact | null {
+  const candidates = facts
+    .filter((fact) => fact.kind === "official-description")
+    .filter((fact) => mayDisplayFact(fact, input) === "granted")
+    .filter((fact) =>
+      DESCRIPTION_SOURCE_ORDER.includes(fact.provenance.provider),
+    );
+
+  if (candidates.length === 0) return null;
+
+  const ranked = [...candidates].sort((a, b) => {
+    const bySource =
+      DESCRIPTION_SOURCE_ORDER.indexOf(a.provenance.provider) -
+      DESCRIPTION_SOURCE_ORDER.indexOf(b.provenance.provider);
+    if (bySource !== 0) return bySource;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+
+  return ranked[0];
+}
+
 /**
  * Every credit line a set of facts and media obliges, deduplicated, in stable order.
  *

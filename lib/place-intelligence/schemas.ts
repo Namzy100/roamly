@@ -56,7 +56,13 @@ export const ProviderIdSchema = z.enum([
 
 export const LicenceIdSchema = z.enum([
   "CC0-1.0",
+  "CC-BY-2.0",
+  "CC-BY-2.5",
+  "CC-BY-3.0",
   "CC-BY-4.0",
+  "CC-BY-SA-2.0",
+  "CC-BY-SA-2.5",
+  "CC-BY-SA-3.0",
   "CC-BY-SA-4.0",
   "ODbL-1.0",
   "public-domain",
@@ -87,6 +93,7 @@ export const PlaceFactKindSchema = z.enum([
   "wikidata-id",
   "inception-year",
   "heritage-status",
+  "official-description",
   "weather-forecast",
   "live-busyness",
   "temporary-closure",

@@ -123,7 +123,20 @@ export const PROVIDER_LICENCE: Partial<Record<ProviderId, LicenceId>> = {
 
 /** Licences that oblige a visible credit. CC0 and public domain do not; everything else here does. */
 const ATTRIBUTION_REQUIRED: ReadonlySet<LicenceId> = new Set<LicenceId>([
+  /*
+   * Every Creative Commons BY and BY-SA version, not only 4.0.
+   *
+   * Attribution is the defining condition of the whole family, in every version since 1.0. Listing only 4.0 would make
+   * the *older* licences the ones that display without a credit — precisely inverted, since a 2005 photograph is more
+   * likely to have a creator who cannot be re-contacted, not less.
+   */
+  "CC-BY-2.0",
+  "CC-BY-2.5",
+  "CC-BY-3.0",
   "CC-BY-4.0",
+  "CC-BY-SA-2.0",
+  "CC-BY-SA-2.5",
+  "CC-BY-SA-3.0",
   "CC-BY-SA-4.0",
   "ODbL-1.0",
   "proprietary",
@@ -139,9 +152,27 @@ export function attributionIsRequired(licence: LicenceId): boolean {
   return ATTRIBUTION_REQUIRED.has(licence);
 }
 
-/** Licences that require the licence itself to be linked, not merely named. */
+/**
+ * Licences that require the licence itself to be linked, not merely named.
+ *
+ * Every CC BY and BY-SA version, for the same reason they all require a credit: each one obliges a reuser to include
+ * the licence's URI or a link to it, so naming "CC BY-SA 3.0" in a caption without pointing anywhere does not discharge
+ * the condition. A set rather than the two `===` comparisons this replaced — with eight members, a chain of
+ * comparisons is a place to forget one.
+ */
+const LICENCE_LINK_REQUIRED: ReadonlySet<LicenceId> = new Set<LicenceId>([
+  "CC-BY-2.0",
+  "CC-BY-2.5",
+  "CC-BY-3.0",
+  "CC-BY-4.0",
+  "CC-BY-SA-2.0",
+  "CC-BY-SA-2.5",
+  "CC-BY-SA-3.0",
+  "CC-BY-SA-4.0",
+]);
+
 export function licenceLinkIsRequired(licence: LicenceId): boolean {
-  return licence === "CC-BY-4.0" || licence === "CC-BY-SA-4.0";
+  return LICENCE_LINK_REQUIRED.has(licence);
 }
 
 /**
