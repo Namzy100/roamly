@@ -1,7 +1,7 @@
 "use client";
 
 import { List, MapPin } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { MapPanel } from "@/components/map/map-panel";
 import { AccommodationCard } from "@/components/trip/accommodation-card";
@@ -32,6 +32,10 @@ import { canRefinePlaces } from "@/lib/refinement/eligibility";
 import { hoursConflictCandidates } from "@/lib/refinement/resolve-hours";
 import { alternativesForItem } from "@/lib/structural-edits/alternatives";
 import { describeEditedItem } from "@/lib/structural-edits/preview-item";
+import {
+  stopAlternatives,
+  type StopAlternative,
+} from "@/lib/structural-edits/stop-alternatives";
 import { freeWindowForItem } from "@/lib/structural-edits/set-schedule";
 import { findOpenSlotForItem } from "@/lib/plan/schedule-repair";
 import { deriveMapRouteLines } from "@/lib/map/derive-routes";
@@ -311,6 +315,47 @@ export function TripWorkspace({
     describeEditedItem(structural.preview(command), itemId);
 
   /**
+   * The open stop's alternatives, described — and memoised, which is not optional here.
+   *
+   * `stopAlternatives` runs the real applier once per alternative, so one call is up to five full
+   * plan applications and five schema parses. The panel re-renders on hover, and hovering a card
+   * moves the pointer across a list of them, so an unmemoised derivation would do that work dozens
+   * of times a second for a picker whose contents cannot have changed.
+   *
+   * The key is the revision plus the stop, because the revision is what moves when the plan does:
+   * every structural edit and every refinement bumps it under the same guard, so a cached answer
+   * outliving the plan it described is not a state this can reach. `plan`, `generation` and
+   * `timezone` stay in the dependency list for the one case the revision does not cover — a
+   * different trip's record arriving under the same revision number.
+   */
+  const comparisonCache = useRef<{
+    key: string;
+    value: StopAlternative[];
+  } | null>(null);
+
+  const alternativeComparisonsFor = useCallback(
+    ({ dayNumber, itemId }: { dayNumber: number; itemId: string }) => {
+      const key = `${structural.revision ?? "none"}:${dayNumber}:${itemId}`;
+      if (comparisonCache.current?.key === key) {
+        return comparisonCache.current.value;
+      }
+
+      const value = stopAlternatives({
+        plan,
+        generation,
+        dayNumber,
+        itemId,
+        timezone,
+        revisionBefore: structural.revision ?? 0,
+      });
+
+      comparisonCache.current = { key, value };
+      return value;
+    },
+    [plan, generation, timezone, structural.revision],
+  );
+
+  /**
    * Reordering by drag or by keyboard (Phase 8).
    *
    * Handed the hook's own `preview` and `run`, so a completed drag is a `move-item` going through
@@ -493,6 +538,14 @@ export function TripWorkspace({
                       itemId,
                       timezone,
                     }),
+                  /*
+                   * The described version, asked for only by the picker that is open.
+                   *
+                   * Same derivation underneath, so this list and the count on the Swap control
+                   * cannot come apart — but this one runs the applier per alternative, which is
+                   * why it is a second callback rather than a richer return from the first.
+                   */
+                  alternativeComparisonsFor,
                   freeWindowFor: ({
                     dayNumber,
                     itemId,

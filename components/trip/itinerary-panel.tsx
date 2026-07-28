@@ -35,6 +35,7 @@ import { deriveDayTravelSummary } from "@/lib/plan";
 import type { OpeningEvaluation } from "@/lib/opening-hours";
 import type { StructuralEditCommand } from "@/lib/refinement/commands";
 import type { EditedItemPreview } from "@/lib/structural-edits/preview-item";
+import type { StopAlternative } from "@/lib/structural-edits/stop-alternatives";
 import {
   isTravellerLocked,
   supportsTravellerLock,
@@ -93,6 +94,7 @@ export function ItineraryPanel({
   describeCommand,
   reorder,
   alternativesFor,
+  alternativeComparisonsFor,
   freeWindowFor,
   canMoveItems = false,
   openingHoursByItemId,
@@ -166,6 +168,22 @@ export function ItineraryPanel({
     dayNumber: number;
     itemId: string;
   }) => TripPlace[];
+  /**
+   * The same alternatives, described — from `stopAlternatives`.
+   *
+   * Separate from `alternativesFor` because of what it costs: that one is asked for **every**
+   * rendered stop, to decide whether a Swap control exists and what number is on it. This one runs
+   * the real applier once per alternative, so it is asked only for the stop whose picker is open —
+   * a panel that re-derived five previews for every card on every hover would be doing several
+   * hundred plan applications to render a mouse move.
+   *
+   * Both read the same derivation underneath, so the count on the control and the length of the
+   * list cannot disagree.
+   */
+  alternativeComparisonsFor?: (input: {
+    dayNumber: number;
+    itemId: string;
+  }) => StopAlternative[];
   /** The gap a stop could occupy, from `freeWindowForItem`. */
   freeWindowFor?: (input: { dayNumber: number; itemId: string }) => {
     earliest: string;
@@ -438,13 +456,15 @@ export function ItineraryPanel({
                     item,
                     dayNumber: day.dayNumber,
                     openKind,
-                    alternatives,
                     editBusy,
                     close: () => setOpen(null),
                     run: runAndClose,
                     ...(checkCommand ? { checkCommand } : {}),
                     ...(describeCommand ? { describeCommand } : {}),
                     ...(freeWindowFor ? { freeWindowFor } : {}),
+                    ...(alternativeComparisonsFor
+                      ? { alternativeComparisonsFor }
+                      : {}),
                     ...(onCommand ? { onCommand } : {}),
                   });
 
@@ -780,19 +800,18 @@ function stopEditor({
   item,
   dayNumber,
   openKind,
-  alternatives,
   editBusy,
   close,
   run,
   checkCommand,
   describeCommand,
   freeWindowFor,
+  alternativeComparisonsFor,
   onCommand,
 }: {
   item: ItineraryItem;
   dayNumber: number;
   openKind: EditorKind | null;
-  alternatives: TripPlace[];
   editBusy: boolean;
   close: () => void;
   run: (command: StructuralEditCommand) => void;
@@ -805,6 +824,10 @@ function stopEditor({
     earliest: string;
     latest: string;
   } | null;
+  alternativeComparisonsFor?: (input: {
+    dayNumber: number;
+    itemId: string;
+  }) => StopAlternative[];
   onCommand?: (command: StructuralEditCommand) => void;
 }): ReactNode | undefined {
   if (!onCommand || openKind === null) return undefined;
@@ -873,12 +896,23 @@ function stopEditor({
     );
   }
 
+  /*
+   * The comparison is derived here, not above, and only for the stop that is open.
+   *
+   * `stopEditor` runs once per rendered card, so calling `alternativeComparisonsFor` outside this
+   * branch would run the applier five times for every stop on the day whether or not its picker was
+   * showing. The trigger's own gate is `alternativeCount`, which comes from the cheap derivation —
+   * so the control and this list still agree without this ever running for a closed picker.
+   */
+  if (!alternativeComparisonsFor) return undefined;
+
+  const alternatives = alternativeComparisonsFor({ dayNumber, itemId: item.id });
   if (alternatives.length === 0) return undefined;
 
   return (
     <StopAlternatives
       item={item}
-      places={alternatives}
+      alternatives={alternatives}
       busy={editBusy}
       onSelect={(alternativePlaceId) =>
         run({

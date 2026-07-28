@@ -7,11 +7,19 @@ import { alternativeIsSelectable } from "./select-alternative";
 /**
  * How many alternatives a stop offers at once.
  *
- * Six, matching `hoursConflictCandidates`. A swap is a choice between recognisable options, not a
- * browse through the pool — a list long enough to scroll is a list nobody reads to the end, and the
- * place pool panel is where the full set belongs.
+ * Five. A swap is a choice between recognisable options, not a browse through the pool — a list
+ * long enough to scroll is a list nobody reads to the end, and the place pool panel is where the
+ * full set belongs.
+ *
+ * Five rather than the six `hoursConflictCandidates` uses, because these are now comparison cards
+ * rather than names: each carries its relation facts and a schedule preview, so the same list is
+ * several times taller and the point at which it stops being comparable arrives sooner.
+ *
+ * There is no floor. Fewer than five — or none — is the honest answer when the pool holds no more
+ * unused places of this category, and relaxing the filter to reach a target count would be
+ * inventing options out of a shortage.
  */
-const DEFAULT_LIMIT = 6;
+const DEFAULT_LIMIT = 5;
 
 /**
  * The places a stop could be swapped to.

@@ -90,8 +90,13 @@ export type CandidateFilter = {
  * one — a market may be covered or not. It is used only to order a preference the
  * traveller expressed, never to make a claim in the plan, and "indoor" never
  * appears in generated text.
+ *
+ * Exported for `lib/structural-edits/stop-alternatives.ts`, which labels an option
+ * indoor or outdoor on a comparison card. Shared rather than copied: two sets would
+ * eventually disagree about a winery, and the disagreement would show up as a filter
+ * and a label contradicting each other about the same place.
  */
-const INDOOR_CATEGORIES: ReadonlySet<PlaceCategory> = new Set([
+export const INDOOR_CATEGORIES: ReadonlySet<PlaceCategory> = new Set([
   "museum",
   "gallery",
   "theatre",

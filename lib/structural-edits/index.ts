@@ -60,6 +60,24 @@ export {
 /** The pool-wide derivation `alternativeIsSelectable` was written to be filtered by. */
 export { alternativesForItem } from "./alternatives";
 
+/**
+ * The same alternatives, described (Phase 8 / Checkpoint 4).
+ *
+ * Separate from `alternativesForItem` because the cost differs by an order of magnitude: that one
+ * runs for every rendered card to decide whether a Swap control exists, this one runs the real
+ * applier once per alternative and belongs only to the stop whose picker is open.
+ */
+export {
+  ALTERNATIVE_FACT_LABELS,
+  estimateFact,
+  matchedDietaryNeeds,
+  stopAlternatives,
+  type AlternativeRelationFact,
+  type AlternativeRelationFactKind,
+  type StopAlternative,
+  type StopAlternativeSchedulePreview,
+} from "./stop-alternatives";
+
 export {
   insertAt,
   removeById,

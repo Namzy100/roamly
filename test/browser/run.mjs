@@ -3317,9 +3317,74 @@ async function scenarioEditingControls(chrome, fixtures) {
       `);
     });
 
+    /**
+     * The comparison card says what it can evidence, and nothing beyond it.
+     *
+     * Checked in a real browser rather than only in the unit suite because the failure this guards
+     * against is a *rendering* one: a label the vocabulary allows, placed next to a rating or a
+     * badge the component added on its own. So this reads the text the traveller actually sees.
+     */
+    await expect("alternatives compare on facts and claim nothing more", async () => {
+      const cards = await page.evaluate(`
+        const root = document.querySelector('[data-testid="alternatives"]');
+        if (root === null) return null;
+
+        const options = [...root.querySelectorAll('[data-testid="alternative-option"]')];
+
+        return {
+          count: options.length,
+          note: root.querySelector('p')?.textContent ?? '',
+          text: root.textContent.toLowerCase(),
+          statuses: options.map((option) => option.dataset.scheduleStatus),
+          /* Every card names the window it would occupy. */
+          timed: options.every((option) => /\\d{2}:\\d{2}/.test(option.textContent)),
+          /* At least one card distinguishes itself, or the list is not a comparison. */
+          facts: options.some(
+            (option) => option.querySelectorAll('[data-testid="alternative-fact"]').length > 0,
+          ),
+        };
+      `);
+
+      if (cards === null) return "the alternatives list was not open";
+
+      /*
+       * The claims Roamly has no source for. OpenStreetMap supplies no rating, no review count and
+       * no popularity signal, so any of these in the rendered text is a fabrication.
+       */
+      const unsupported = [
+        "best",
+        "top-rated",
+        "highly rated",
+        "more popular",
+        "hidden gem",
+        "less crowded",
+        "more scenic",
+        "better reviews",
+        "local favourite",
+        "recommended",
+      ];
+
+      const claim = unsupported.find((phrase) => cards.text.includes(phrase));
+      if (claim) return `a card claimed “${claim}”`;
+
+      /* The straight-line caveat is stated before the numbers it governs, not after each one. */
+      if (!cards.note.includes("straight-line")) {
+        return "the group did not say distances are straight-line";
+      }
+
+      /* A card the applier would refuse must never be offered as selectable. */
+      if (cards.statuses.some((status) => status === "invalid")) {
+        return "an option previewed as refused";
+      }
+
+      return cards.count > 0 && cards.timed && cards.facts;
+    });
+
     await expect("choosing an alternative swaps the place and saves once", async () => {
       const option = await page.evaluate(`
-        const button = document.querySelector('[data-testid="alternative-option"]');
+        const button = document.querySelector(
+          '[data-testid="alternative-option"]:not([disabled])',
+        );
         if (button === null) return null;
         const card = button.closest('[data-testid="itinerary-item"]');
         return { placeId: button.dataset.placeId, itemId: card.dataset.itemId };
