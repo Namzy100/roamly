@@ -1,4 +1,4 @@
-import { BedDouble, Check, MapPin, SearchX, Star } from "lucide-react";
+import { BedDouble, Check, MapPin, SearchX } from "lucide-react";
 
 import { formatMoney } from "@/lib/format";
 import type { AccommodationRecommendation, Currency } from "@/lib/schemas";
@@ -39,16 +39,10 @@ export function AccommodationCard({
         <p className="flex items-center gap-1.5 text-xs text-ink-muted">
           <MapPin aria-hidden className="size-3" />
           {accommodation.neighborhood}
-          {place.rating !== undefined ? (
-            <>
-              <span aria-hidden>·</span>
-              <Star
-                aria-hidden
-                className="size-3 fill-terracotta text-terracotta"
-              />
-              <span className="font-medium text-ink">{place.rating}</span>
-            </>
-          ) : null}
+          {/*
+            * No rating. OpenStreetMap supplies none for a hotel any more than for a café, so this only ever rendered for the
+            * mock sample — see the note in `itinerary-item-card.tsx` for the full reasoning.
+            */}
         </p>
       </div>
 

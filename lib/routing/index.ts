@@ -84,6 +84,24 @@ export {
 
 export { toTravelSegment } from "./segment";
 
+/**
+ * Route-input validity (Checkpoint 5A remediation).
+ *
+ * A leg id says whether an adjacency is still in the plan; a fingerprint says whether a stored result was computed from the
+ * inputs the plan now has. The two answer different questions, and only the second catches a place swap that keeps its item
+ * id.
+ */
+export {
+  fingerprintForLeg,
+  policyComponent,
+  routeInputFingerprint,
+  routeInputsMatch,
+  segmentValidity,
+  ROUTE_FINGERPRINT_VERSION,
+  type RouteInputs,
+  type SegmentValidity,
+} from "./fingerprint";
+
 export {
   MatrixRequestSchema,
   ModePolicySchema,

@@ -1,4 +1,5 @@
 import {
+  fingerprintForLeg,
   toTravelSegment,
   type RoutedDayResult,
   type RoutedDayLeg,
@@ -8,7 +9,6 @@ import {
   assertItineraryUsesPool,
   PoolValidationError,
   type AppliedRoutingPolicy,
-  type ExistingSegmentPolicy,
   type ItineraryDay,
   type ItineraryItem,
   type TravelSegment,
@@ -139,7 +139,7 @@ export function enrichTripPlanWithRouting(
   // 4 — build the new plan. Nothing above this line has written anything.
   const days = plan.days.map((day) =>
     withDerivedDayTotals(
-      rebuildDay(day, expectedLegs, resultsByLegId, routingPolicy.existingSegments),
+      rebuildDay(day, expectedLegs, resultsByLegId, routingPolicy),
     ),
   );
 
@@ -292,7 +292,14 @@ function rebuildDay(
   day: ItineraryDay,
   expectedLegs: ExpectedLeg[],
   resultsByLegId: Map<string, RoutedDayLeg>,
-  policy: ExistingSegmentPolicy,
+  /**
+   * The whole policy, not only its `existingSegments` field.
+   *
+   * Widened when route-input fingerprints arrived: a fingerprint has to record the mode thresholds and the day-bracketing
+   * decision as well, because both change what a leg *is*. Passing the one field would mean the fingerprint could not see
+   * the inputs it exists to capture.
+   */
+  policy: AppliedRoutingPolicy,
 ): ItineraryDay {
   // Which leg, if any, hangs off each item. Built from the expected set, so an
   // item with no eligible successor keeps whatever it had.
@@ -314,6 +321,7 @@ function rebuildDay(
     return next === item.travelToNext ? { ...item } : { ...item, travelToNext: next };
   });
 
+
   return { ...day, items };
 }
 
@@ -329,7 +337,7 @@ function rebuildDay(
 function resolveSegment(
   existing: TravelSegment | null,
   routed: RoutedDayLeg,
-  policy: ExistingSegmentPolicy,
+  policy: AppliedRoutingPolicy,
 ): TravelSegment {
   const replacement = toTravelSegment(
     { id: routed.id, fromPlaceId: routed.fromPlaceId, toPlaceId: routed.toPlaceId },
@@ -337,11 +345,19 @@ function resolveSegment(
     // Editorial notes describe the journey and survive re-routing; a routed
     // result has no note of its own to contribute.
     existing?.note ?? null,
+    /*
+     * Stamped here, at the one place a provider result becomes a stored segment.
+     *
+     * `routed` is the expected leg the request was built from, so its place ids, coordinates and mode are exactly the
+     * inputs the router consumed. Deriving the fingerprint anywhere later would mean deriving it from the plan as it is
+     * *now*, which would make every segment trivially self-consistent and the check worthless.
+     */
+    fingerprintForLeg(routed, policy),
   );
 
   if (existing === null) return replacement;
 
-  switch (policy) {
+  switch (policy.existingSegments) {
     case "refresh-all":
       return replacement;
 

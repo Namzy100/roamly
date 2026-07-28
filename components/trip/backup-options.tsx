@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarPlus, LifeBuoy, Loader2, Repeat, Star } from "lucide-react";
+import { CalendarPlus, LifeBuoy, Loader2, Repeat } from "lucide-react";
 
 import { formatMoney } from "@/lib/format";
 import { ITEM_KIND_LABELS, type BackupOption, type Currency } from "@/lib/schemas";
@@ -82,15 +82,11 @@ export function BackupOptions({
                 {ITEM_KIND_LABELS[backup.kind]}
               </span>
               <span>{backup.place.name}</span>
-              {backup.place.rating !== undefined ? (
-                <span className="inline-flex items-center gap-1">
-                  <Star
-                    aria-hidden
-                    className="size-2.5 fill-terracotta text-terracotta"
-                  />
-                  {backup.place.rating}
-                </span>
-              ) : null}
+              {/*
+                * No rating, for the reason set out in `itinerary-item-card.tsx`: mock-only, so present on the demo trip and
+                * absent from every real one. A fallback is the last place a ranking signal belongs anyway — a backup is
+                * chosen because the first choice fell through, not because it scored well.
+                */}
 
               {canReplace && onReplace ? (
                 <button

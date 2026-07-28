@@ -22,12 +22,21 @@ export function toTravelSegment(
   leg: Pick<RoutedDayLeg, "id" | "fromPlaceId" | "toPlaceId">,
   result: RouteResult,
   note: string | null = null,
+  /**
+   * The inputs this result was computed from, from `fingerprintForLeg`.
+   *
+   * Optional so the many places that build a segment in a test or a fixture do not each have to
+   * assemble a policy — but every *production* caller passes it, because a segment written without
+   * one can only ever be `unverified` and will prompt a needless recalculation.
+   */
+  inputFingerprint?: string,
 ): TravelSegment {
   if (result.status === "unavailable") {
     return {
       id: leg.id,
       fromPlaceId: leg.fromPlaceId,
       toPlaceId: leg.toPlaceId,
+      ...(inputFingerprint ? { inputFingerprint } : {}),
       note,
       status: "unavailable",
       requestedMode: toTravelMode(result.requestedMode),
@@ -40,6 +49,7 @@ export function toTravelSegment(
     id: leg.id,
     fromPlaceId: leg.fromPlaceId,
     toPlaceId: leg.toPlaceId,
+    ...(inputFingerprint ? { inputFingerprint } : {}),
     note,
     status: "routed",
     provider: result.provider,

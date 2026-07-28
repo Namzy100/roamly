@@ -76,6 +76,20 @@ const TravelSegmentEndpointsSchema = z.object({
   toPlaceId: z.string().min(1),
   /** Editorial colour, never a factual claim about the journey. */
   note: z.string().nullable(),
+  /**
+   * The inputs this result was computed from — see `lib/routing/fingerprint.ts`.
+   *
+   * `.optional()` rather than a `TRIP_PLAN_SCHEMA_VERSION` bump, the same reasoning `routing` and
+   * `retainedPlaces` were added under: every segment written before fingerprints existed parses
+   * unchanged and reports "cannot be verified", which is true. Bumping the version to add a field
+   * would make every previously exported file unreadable — `PortableTripSchema` pins the plan
+   * version with `z.literal` — and that is a real cost for no compatibility benefit.
+   *
+   * Absent is therefore a legitimate state with a defined meaning rather than a gap.
+   * `segmentValidity` treats it as `unverified`: kept, checked as far as its endpoints allow, and
+   * reported, so a recalculation can be offered instead of the figure being silently trusted.
+   */
+  inputFingerprint: z.string().min(1).optional(),
 });
 
 /**

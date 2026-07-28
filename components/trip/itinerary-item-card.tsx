@@ -6,7 +6,6 @@ import {
   Lightbulb,
   MapPin,
   MapPinOff,
-  Star,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -15,7 +14,6 @@ import { formatMoney, formatTimeRange } from "@/lib/format";
 import type { OpeningEvaluation } from "@/lib/opening-hours";
 import {
   ITEM_KIND_LABELS,
-  PRICE_LEVEL_LABELS,
   placeCategoryLabel,
   type Currency,
   type ItineraryItem,
@@ -267,24 +265,25 @@ export function ItineraryItemCard({
           ) : null}
 
           <div className="mt-0.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
+            {/*
+              * The category, and no ranking signal beside it.
+              *
+              * `TripPlace` can carry `rating`, `userRatingCount` and `priceLevel`, and this row used to render all three.
+              * They are gone, for a reason `docs/PROVIDER_RESEARCH.md` settled: OpenStreetMap supplies none of them, so they
+              * existed **only** on the mock sample — visible on the demo trip and absent from every real one.
+              *
+              * That inconsistency is the argument. A star rating that appears for one trip and not the next is not a feature
+              * with patchy coverage; it is an interface making a claim it can only sometimes support, and the traveller has
+              * no way to know which case they are looking at.
+              *
+              * Nor will they ever be filled in. Checkpoint 5A rejected Google (no caching of Places content) and Yelp
+              * (24-hour storage cap, no blending with other sources), and no accepted provider supplies a rating under terms
+              * Roamly can meet. These were not placeholders waiting for data — they were dead UI.
+              *
+              * The schema keeps the fields: they are real facts about the mock fixture, and `lib/schemas/place.ts` already
+              * documents them as mock-only. What changed is that no product surface reads them.
+              */}
             <div className="flex items-center gap-3 text-xs text-ink-muted">
-              {place && place.rating !== undefined ? (
-                <span className="inline-flex items-center gap-1">
-                  <Star
-                    aria-hidden
-                    className="size-3 fill-terracotta text-terracotta"
-                  />
-                  <span className="font-medium text-ink">{place.rating}</span>
-                  {place.userRatingCount !== undefined ? (
-                    <span>
-                      ({place.userRatingCount.toLocaleString("en-GB")})
-                    </span>
-                  ) : null}
-                </span>
-              ) : null}
-              {place?.priceLevel ? (
-                <span>{PRICE_LEVEL_LABELS[place.priceLevel]}</span>
-              ) : null}
               {place ? <span>{placeCategoryLabel(place)}</span> : null}
             </div>
 

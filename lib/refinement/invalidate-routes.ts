@@ -3,6 +3,7 @@ import {
   owningItemIdForLeg,
   type ExpectedLeg,
 } from "@/lib/plan";
+import { segmentValidity } from "@/lib/routing";
 import type {
   AppliedRoutingPolicy,
   ItineraryDay,
@@ -56,10 +57,18 @@ import type {
 
 export type RekeyedDay = {
   day: ItineraryDay;
-  /** Ids whose stored result was dropped because its adjacency is gone. */
+  /** Ids whose stored result was dropped because its adjacency is gone, or its inputs changed. */
   invalidatedLegIds: string[];
   /** Expected legs that now have no result. */
   pendingLegIds: string[];
+  /**
+   * Legs kept but not provable, because they predate route-input fingerprints.
+   *
+   * Their adjacency and both endpoints still check out; what cannot be checked is whether the place
+   * moved under an unchanged id. Reported rather than silently trusted or silently dropped, so the
+   * interface can offer a recalculation instead of either.
+   */
+  unverifiedLegIds: string[];
 };
 
 export function rekeyDaySegments(input: {
@@ -82,8 +91,39 @@ export function rekeyDaySegments(input: {
     if (item.travelToNext) existing.set(item.travelToNext.id, item.travelToNext);
   }
 
-  const invalidatedLegIds = [...existing.keys()].filter(
-    (legId) => !expectedById.has(legId),
+  /**
+   * Two reasons a stored result cannot survive, and the second is the one this file used to miss.
+   *
+   * **The adjacency is gone.** Its leg id is no longer expected — the stop was removed, reordered, moved to another day.
+   * Set membership answers it, which is what the module comment above describes.
+   *
+   * **The inputs changed under a surviving id.** Leg identity is built from *item* ids, and
+   * `applySelectAlternative` deliberately keeps the item id when it swaps a stop's place. So after a swap the leg id is
+   * still expected while the routed distance, duration and geometry were measured to a **different building**. Membership
+   * cannot see that; `routeInputsMatch` can, because a fingerprint contains the place ids, the coordinates, the mode and
+   * the policy.
+   *
+   * Both are `invalidated` — from the traveller's side there is no difference between "that journey is gone" and "that
+   * measurement was of somewhere else". Both mean: recalculate.
+   */
+  const unverifiedLegIds: string[] = [];
+  const invalidatedLegIds: string[] = [];
+
+  for (const [legId, segment] of existing) {
+    const leg = expectedById.get(legId);
+    if (!leg) {
+      invalidatedLegIds.push(legId);
+      continue;
+    }
+
+    const validity = segmentValidity(segment, leg, input.policy);
+    if (validity === "stale") invalidatedLegIds.push(legId);
+    else if (validity === "unverified") unverifiedLegIds.push(legId);
+  }
+
+  /** Only results that survived both checks may be re-attached. */
+  const surviving = new Set(
+    [...existing.keys()].filter((legId) => !invalidatedLegIds.includes(legId)),
   );
 
   const legByOwner = new Map<string, ExpectedLeg>();
@@ -101,18 +141,28 @@ export function rekeyDaySegments(input: {
       return item.travelToNext === null ? item : { ...item, travelToNext: null };
     }
 
-    const retained = existing.get(leg.id) ?? null;
+    /*
+     * `surviving` rather than `existing`, which is the whole fix in one word.
+     *
+     * Reading straight from `existing` re-attached anything whose id was expected, including a measurement to a place the
+     * stop no longer uses.
+     */
+    const retained = surviving.has(leg.id)
+      ? (existing.get(leg.id) ?? null)
+      : null;
     return retained === item.travelToNext ? item : { ...item, travelToNext: retained };
   });
 
+  /** A leg whose result was invalidated is pending again — there is nothing left describing it. */
   const pendingLegIds = expected
-    .filter((leg) => !existing.has(leg.id))
+    .filter((leg) => !surviving.has(leg.id))
     .map((leg) => leg.id);
 
   return {
     day: { ...input.day, items },
     invalidatedLegIds,
     pendingLegIds,
+    unverifiedLegIds,
   };
 }
 
@@ -130,9 +180,11 @@ export function rekeyPlanSegments(input: {
   plan: TripPlan;
   invalidatedLegIds: string[];
   pendingLegIds: string[];
+  unverifiedLegIds: string[];
 } {
   const invalidatedLegIds: string[] = [];
   const pendingLegIds: string[] = [];
+  const unverifiedLegIds: string[] = [];
 
   const days = input.plan.days.map((day) => {
     const rekeyed = rekeyDaySegments({
@@ -142,6 +194,7 @@ export function rekeyPlanSegments(input: {
     });
     invalidatedLegIds.push(...rekeyed.invalidatedLegIds);
     pendingLegIds.push(...rekeyed.pendingLegIds);
+    unverifiedLegIds.push(...rekeyed.unverifiedLegIds);
     return rekeyed.day;
   });
 
@@ -149,6 +202,7 @@ export function rekeyPlanSegments(input: {
     plan: { ...input.plan, days },
     invalidatedLegIds,
     pendingLegIds,
+    unverifiedLegIds,
   };
 }
 
