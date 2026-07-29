@@ -276,6 +276,79 @@ export async function startValhalla() {
 }
 
 /**
+ * Wikidata, Wikipedia and Wikimedia Commons — all answering "nothing here".
+ *
+ * ## Why an empty fixture is the useful one
+ *
+ * The Overpass fixture's places carry no `wikipedia` or `wikidata` tag, so the only endpoint a lookup reaches for
+ * them is the nearby SPARQL fallback. Answering it with an empty result set makes every place `unmatched`, which is
+ * both the most common real outcome and the one with the most ways to be reported dishonestly: the panel must say
+ * Wikidata's coverage is incomplete without implying anything about the traveller's itinerary.
+ *
+ * ## Why it must exist at all
+ *
+ * Without it the *server* would query live Wikidata. Blocking the hosts in Chrome does nothing about that — the route
+ * runs in Node — and a verification suite that queried volunteer infrastructure on every commit is one nobody could
+ * run. `state.requests` is counted so a scenario can prove the fixture, rather than the internet, was consulted.
+ *
+ * The shapes mirror `lib/providers/place-intelligence/wikimedia/fixtures.ts`: an empty SPARQL binding list, a
+ * MediaWiki query with no pages, and an entity document with no entities.
+ */
+export async function startWikimedia() {
+  const state = { requests: 0, paths: [] };
+
+  const server = createServer((request, response) => {
+    state.requests += 1;
+    state.paths.push(request.url ?? "");
+
+    /* Bodies are drained even though nothing reads them: an unread POST body stalls the socket. */
+    request.on("data", () => {});
+    request.on("end", () => {
+      const path = request.url ?? "";
+
+      if (path.includes("/sparql")) {
+        /* `NEARBY_EMPTY_RESPONSE`: a real answer, and the one most of the world produces. */
+        respondJson(response, {
+          head: { vars: ["item"] },
+          results: { bindings: [] },
+        });
+        return;
+      }
+
+      if (path.includes("EntityData")) {
+        respondJson(response, { entities: {} });
+        return;
+      }
+
+      /* Every MediaWiki `api.php` — Wikidata's, Commons', and any language's Wikipedia. */
+      respondJson(response, { batchcomplete: true, query: { pages: [] } });
+    });
+  });
+
+  const port = await listen(server);
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  return {
+    server,
+    state,
+    baseUrl,
+    /**
+     * The environment that points every Wikimedia endpoint at this server.
+     *
+     * Returned as one object so a scenario cannot wire three of the four and reach upstream for the fourth — the
+     * failure that would look like a passing test until the day the network was down.
+     */
+    env: {
+      ROAMLY_WIKIDATA_SPARQL_URL: `${baseUrl}/sparql`,
+      ROAMLY_WIKIDATA_API_URL: `${baseUrl}/w/api.php`,
+      ROAMLY_WIKIDATA_ENTITY_BASE_URL: `${baseUrl}/wiki/Special:EntityData`,
+      ROAMLY_COMMONS_API_URL: `${baseUrl}/commons/w/api.php`,
+      ROAMLY_WIKIPEDIA_API_URL_TEMPLATE: `${baseUrl}/{lang}/w/api.php`,
+    },
+  };
+}
+
+/**
  * Gemini.
  *
  * `mode` selects the behaviour under test:

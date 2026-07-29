@@ -7,11 +7,17 @@ import {
   MapPin,
   MapPinOff,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { formatMoney, formatTimeRange } from "@/lib/format";
 import type { OpeningEvaluation } from "@/lib/opening-hours";
+import {
+  deriveLandmarkCardIntelligence,
+  type IsoTimestamp,
+  type PlaceIntelligence,
+} from "@/lib/place-intelligence";
+import { describeLandmarkContext } from "@/lib/trip/landmark-context";
 import {
   ITEM_KIND_LABELS,
   placeCategoryLabel,
@@ -25,6 +31,7 @@ import {
 } from "@/lib/trip/item-card";
 import { cn } from "@/lib/utils";
 
+import { LandmarkContext } from "./landmark-context";
 import { OpeningHoursBadge } from "./opening-hours-badge";
 
 /**
@@ -68,6 +75,8 @@ export function ItineraryItemCard({
   hovered,
   dragging = false,
   openingHours,
+  intelligence,
+  now,
   onSelect,
   onHoverChange,
   actions,
@@ -103,6 +112,26 @@ export function ItineraryItemCard({
    * one on the card being the one a traveller actually reads.
    */
   openingHours?: OpeningEvaluation;
+  /**
+   * This stop's landmark enrichment, and nothing else's (Checkpoint 5B, section 10C).
+   *
+   * One entry, not the sidecar. A card handed the whole record would be one lookup away from rendering another
+   * landmark's history under this stop's heading, which is the worst failure available here — and
+   * `deriveLandmarkCardIntelligence` refuses a mismatched `canonicalPlaceId` precisely because that mistake is easy
+   * to make one level up.
+   *
+   * Absent for every trip that has never been enriched, which is the ordinary case.
+   */
+  intelligence?: PlaceIntelligence | null;
+  /**
+   * The clock, supplied by the workspace and stable for the session.
+   *
+   * A parameter because freshness is a display gate: a stale description renders with a label and an expired
+   * thumbnail does not render at all, and a card reading the clock itself would decide that differently on every
+   * re-render — so a label could appear mid-hover. Without it the enrichment region is simply not rendered, since a
+   * gate with no clock cannot be applied honestly.
+   */
+  now?: IsoTimestamp;
   onSelect: () => void;
   onHoverChange: (hovered: boolean) => void;
   /**
@@ -128,6 +157,24 @@ export function ItineraryItemCard({
 }) {
   const { place } = item;
   const unavailable = item.status === "unavailable";
+
+  /**
+   * What this stop's enrichment permits showing.
+   *
+   * Two pure steps, in this order and nowhere else: `deriveLandmarkCardIntelligence` applies the trust, eligibility,
+   * freshness and licence gates, and `describeLandmarkContext` turns what survived into rows. Both are memoised on
+   * their inputs — not for speed, but so the region does not get a new object identity on every hover and re-render
+   * the image beneath it.
+   *
+   * `null` whenever there is no clock, no place or nothing that passed. A card with no context renders no region at
+   * all, which is why there is one `landmark` value rather than three conditions in the markup.
+   */
+  const landmark = useMemo(() => {
+    if (!place || !now) return null;
+
+    const derived = deriveLandmarkCardIntelligence({ place, intelligence, now });
+    return describeLandmarkContext(derived);
+  }, [place, intelligence, now]);
 
   return (
     <article
@@ -302,6 +349,26 @@ export function ItineraryItemCard({
           </div>
         </div>
       </div>
+
+      {/*
+       * The landmark region.
+       *
+       * `relative z-10` and a sibling of the `pointer-events-none` content, for the same reason the action row is: it
+       * contains a disclosure and external links, and rendering it beneath the selection overlay would hand every
+       * one of those clicks to a button whose job is to select the stop. Pressing "details" or a licence link must
+       * not select the card.
+       *
+       * Below the stop's own details and above its actions, which is the order a traveller reads: what this place is,
+       * then what it is historically, then what they can do to it.
+       */}
+      {landmark ? (
+        <div
+          data-testid="item-landmark"
+          className="relative z-10 mt-3 border-t border-line/60 pt-3"
+        >
+          <LandmarkContext view={landmark} itemId={item.id} />
+        </div>
+      ) : null}
 
       {/*
        * The action row.

@@ -141,6 +141,14 @@ export type LandmarkCardFact = {
   /** The stored value, rendered. Never rewritten — see `renderFactValue`. */
   value: string;
   /**
+   * Which project stated it.
+   *
+   * Carried so a card can name its sources from what actually rendered. Without it a card showing dates and no
+   * description would have to *assume* Wikidata to write a source line — true today, and an assumption rather than
+   * a fact, which is the wrong footing for an attribution.
+   */
+  provider: ProviderId;
+  /**
    * Carried through so a card can mark a corroborated fact as such.
    *
    * `disputed` never reaches here: `mayDisplayFact` refuses it. Present anyway, because the difference between
@@ -167,6 +175,14 @@ export type LandmarkCardPhoto = {
   licenceUrl: string | null;
   /** The exact credit line the file carries, which names a creator Roamly cannot re-derive. */
   credit: string | null;
+  /**
+   * Where a person can check the file for themselves — its Commons description page.
+   *
+   * Surfaced rather than left in the provenance because a CC BY-SA credit is two obligations, not one: name the
+   * creator *and* link to the source. A card rendering only the credit line meets half of a licence, and the half it
+   * skips is the half that lets a reader find the original.
+   */
+  sourceUrl: string | null;
   /** Whether a card may resize or crop it. Unknown means no, per `mediaMayBeTransformed`. */
   transformationPermitted: boolean;
 };
@@ -261,6 +277,7 @@ export function deriveLandmarkCardIntelligence(input: {
       kind,
       label: LANDMARK_CARD_FACT_LABELS[kind] ?? kind,
       value: renderFactValue(chosen),
+      provider: chosen.provenance.provider,
       confidence: chosen.confidence,
     });
   }
@@ -356,6 +373,7 @@ function toCardPhoto(media: PlaceMedia): LandmarkCardPhoto {
     licence: media.provenance.licence,
     licenceUrl: media.provenance.licenceUrl ?? null,
     credit: media.provenance.attributionText ?? null,
+    sourceUrl: media.provenance.sourceUrl ?? null,
     transformationPermitted: media.transformationPermitted === true,
   };
 }

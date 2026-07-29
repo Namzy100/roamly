@@ -33,6 +33,7 @@ import {
 import type { ItemReorder } from "@/lib/hooks/use-item-reorder";
 import { deriveDayTravelSummary } from "@/lib/plan";
 import type { OpeningEvaluation } from "@/lib/opening-hours";
+import type { IsoTimestamp, PlaceIntelligence } from "@/lib/place-intelligence";
 import type { StructuralEditCommand } from "@/lib/refinement/commands";
 import type { EditedItemPreview } from "@/lib/structural-edits/preview-item";
 import type { StopAlternative } from "@/lib/structural-edits/stop-alternatives";
@@ -84,6 +85,8 @@ export function ItineraryPanel({
   hoveredItemId,
   selectionSource,
   currency,
+  intelligenceByPlaceId,
+  now,
   onSelectItem,
   onHoverItem,
   onReplaceItem,
@@ -197,6 +200,17 @@ export function ItineraryPanel({
    * traveller reads.
    */
   openingHoursByItemId?: Map<string, OpeningEvaluation>;
+  /**
+   * The trip's landmark sidecar, keyed by canonical place id (Checkpoint 5B, section 10C).
+   *
+   * The panel holds the whole map and hands each card exactly one entry. That split is the point: the lookup happens
+   * once, here, against the key the sidecar is already filed under, so no card is ever in a position to read
+   * another's. Passed as the stored record rather than converted to a `Map`, because `byCanonicalPlaceId` is already
+   * that index and rebuilding it per render would be a second copy to keep in step.
+   */
+  intelligenceByPlaceId?: Record<string, PlaceIntelligence>;
+  /** The workspace's stable clock, forwarded so every card applies the freshness gates at the same instant. */
+  now?: IsoTimestamp;
   busyItemId?: string | null;
   busyLegId?: string | null;
   canReplace?: boolean;
@@ -503,6 +517,18 @@ export function ItineraryPanel({
                                 openingHours: openingHoursByItemId.get(item.id),
                               }
                             : {})}
+                          /*
+                           * One entry, looked up here against the key the sidecar is filed under. `null` rather than
+                           * omitted, because "this stop has no enrichment" is an answer the card renders identically
+                           * to "this trip has none" and does not need to distinguish.
+                           */
+                          intelligence={
+                            item.place
+                              ? (intelligenceByPlaceId?.[item.place.placeId] ??
+                                null)
+                              : null
+                          }
+                          {...(now ? { now } : {})}
                           onSelect={() => onSelectItem(item.id)}
                           onHoverChange={(hovered) =>
                             onHoverItem(hovered ? item.id : null)

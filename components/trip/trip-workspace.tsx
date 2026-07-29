@@ -11,6 +11,7 @@ import { DaySelector } from "@/components/trip/day-selector";
 import { FlightEstimateCard } from "@/components/trip/flight-estimate-card";
 import { GenerationProvenance } from "@/components/trip/generation-provenance";
 import { ItineraryPanel } from "@/components/trip/itinerary-panel";
+import { LandmarkControls } from "@/components/trip/landmark-controls";
 import { PracticalNotes } from "@/components/trip/practical-notes";
 import { PlacePoolPanel } from "@/components/trip/place-pool-panel";
 import { PlacementDialog, type PlacementRequest } from "@/components/trip/placement-dialog";
@@ -41,6 +42,7 @@ import { findOpenSlotForItem } from "@/lib/plan/schedule-repair";
 import { deriveMapRouteLines } from "@/lib/map/derive-routes";
 import { deriveVisibleMapPlaces, reconcileSelection } from "@/lib/map/derive";
 import type { TripGenerationContext, TripPlan } from "@/lib/schemas";
+import { useTripRecord } from "@/lib/store/trip-store";
 import { useWorkspaceStore } from "@/lib/store/workspace-store";
 import { getVisibleItems } from "@/lib/trip/visible-items";
 import { cn } from "@/lib/utils";
@@ -181,6 +183,26 @@ export function TripWorkspace({
    * the pool-age label change under a hover.
    */
   const [now] = useState(() => new Date());
+
+  /**
+   * The same instant as an ISO string, for the display gates.
+   *
+   * `lib/place-intelligence` speaks in `IsoTimestamp` because a stored timestamp is a string and comparing two
+   * strings is what the freshness rules do. Converted once here rather than per card, so every card on the page
+   * applies the same instant — a stale label appearing on one stop and not another would be an artefact of render
+   * order.
+   */
+  const nowIso = useMemo(() => now.toISOString(), [now]);
+
+  /**
+   * The trip's landmark sidecar, if it has one.
+   *
+   * Read from the store rather than taken from `plan`, because enrichment is deliberately *not* on the plan: it is a
+   * sidecar keyed by canonical place id, so that `assertItineraryUsesPool` can keep comparing `TripPlace` records
+   * field by field without an enrichment field making every itinerary look edited.
+   */
+  const intelligenceByPlaceId = useTripRecord(plan.id)?.intelligence
+    ?.byCanonicalPlaceId;
 
   /**
    * Whether an AI planner is configured.
@@ -481,6 +503,8 @@ export function TripWorkspace({
             hoveredItemId={hoveredItemId}
             selectionSource={selectionSource}
             currency={plan.budget.currency}
+            now={nowIso}
+            {...(intelligenceByPlaceId ? { intelligenceByPlaceId } : {})}
             onSelectItem={(itemId) => selectItem(itemId, "list")}
             onHoverItem={hoverItem}
             canReplace={canReplacePlaces}
@@ -660,6 +684,15 @@ export function TripWorkspace({
           />
 
           <RoutingControls plan={plan} />
+
+          {/*
+            * Landmark context sits below routing, and the ordering is deliberate.
+            *
+            * Both are user-initiated provider actions, and this is the optional one: routes change the numbers a
+            * traveller plans around, where photographs and dates are decoration on a plan that already works. Reading
+            * them in this order also puts the two "this costs a volunteer service something" panels together.
+            */}
+          <LandmarkControls tripId={plan.id} />
 
           <BackupOptions
             backups={backups}

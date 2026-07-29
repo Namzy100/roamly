@@ -439,8 +439,34 @@ describe("the photograph", () => {
       licence: "CC-BY-SA-4.0",
       licenceUrl: "https://creativecommons.org/licenses/by-sa/4.0/",
       credit: "Photo by A. Photographer, CC BY-SA 4.0",
+      sourceUrl: null,
       transformationPermitted: true,
     });
+  });
+
+  /**
+   * The second half of a CC BY-SA credit.
+   *
+   * Naming the photographer without linking to the file meets one of the licence's two obligations, and it is the
+   * one a reader cannot work around: there is no way to find the original from a credit line alone.
+   */
+  it("carries the file's own page through when the provenance records one", () => {
+    const filePage = "https://commons.wikimedia.org/wiki/File:Example.jpg";
+    const result = derive(
+      MUSEUM,
+      landmarkSidecar({
+        media: [
+          media({
+            provenance: provenance({
+              provider: "wikimedia-commons",
+              sourceUrl: filePage,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    expect(result.photo?.sourceUrl).toBe(filePage);
   });
 });
 

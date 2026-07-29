@@ -366,9 +366,9 @@ export function useTripIntelligence(tripId: string) {
    * because "forget what you found" is a decision a traveller makes for its own reasons, most often after seeing an entry
    * they believe is wrong.
    */
-  const clear = useCallback(() => {
+  const clear = useCallback((): boolean => {
     const current = record;
-    if (!current || inFlight.current) return;
+    if (!current || inFlight.current) return false;
 
     const result = clearTripIntelligence({
       tripId,
@@ -386,6 +386,23 @@ export function useTripIntelligence(tripId: string) {
             message: "Landmark details were removed from this trip.",
           }
         : toState(describeSaveResult({ saved: result, result: null, failure: null })),
+    );
+
+    /**
+     * Whether the trip is now without landmark context, answered synchronously.
+     *
+     * Returned because the only caller is a confirmation dialog, and a dialog has to decide *in the click* whether to
+     * close or to stay open and show what went wrong. Deriving that from the next render — "close when the sidecar is
+     * gone" — reads the same but cascades a render to do it, and it cannot tell a refusal from a slow update.
+     *
+     * True for three different endings, because all three leave nothing to clear: the entries were removed, there
+     * were none, or the trip itself is no longer here. False only when the sidecar is still in place — a stale
+     * revision or a full store — which are exactly the cases with something to report.
+     */
+    return (
+      result.status === "saved" ||
+      result.status === "unchanged" ||
+      result.status === "missing-trip"
     );
   }, [clearTripIntelligence, record, tripId]);
 
@@ -411,9 +428,21 @@ export function useTripIntelligence(tripId: string) {
           : "offline"
       : state.status;
 
+  /**
+   * Whether this trip already holds landmark context.
+   *
+   * The question that decides which panel a traveller sees — "add" or "refresh and clear" — and it is about the
+   * *stored* sidecar rather than about the last run: a trip enriched yesterday and reloaded today has context and no
+   * outcome to report. Counted rather than tested for presence, because `reconcileTripIntelligence` can leave an
+   * empty record behind when every entry's place has left the itinerary, and an empty sidecar has nothing to clear.
+   */
+  const hasIntelligence =
+    Object.keys(record?.intelligence?.byCanonicalPlaceId ?? {}).length > 0;
+
   return {
     ...state,
     status,
+    hasIntelligence,
     /**
      * How many places this trip permits asking about at all, and how many of those are still unknown.
      *

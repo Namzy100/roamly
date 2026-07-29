@@ -10,6 +10,7 @@ import {
   startNominatim,
   startOverpass,
   startValhalla,
+  startWikimedia,
 } from "./fixtures.mjs";
 
 /**
@@ -3859,6 +3860,420 @@ async function scenarioEditingControls(chrome, fixtures) {
   }
 }
 
+/**
+ * The landmark-context panel (Checkpoint 5B, section 10B).
+ *
+ * ## Nothing here talks to Wikimedia
+ *
+ * `Network.setBlockedURLs` refuses every Wikimedia host at the browser level before the trip is even generated, so a
+ * check that accidentally reached upstream fails rather than succeeding quietly against a volunteer service. The
+ * server side needs no such guard: the Overpass fixture's places carry no `wikipedia` or `wikidata` tag, and
+ * `planWikidataLookup` answers "nothing to look up" for such a place without making a request — so a real end-to-end
+ * enrichment runs here, through the real route and the real workflow, and honestly finds nothing.
+ *
+ * That outcome is the interesting one to verify. "Wikidata does not cover these places" is what a traveller will see
+ * most often, and it is the sentence with the most ways to go wrong: it must not say the places are fake, must not
+ * claim a full trip was checked when it was not, and must not leak a status code.
+ *
+ * ## What this scenario deliberately does not cover
+ *
+ * The clear-confirmation dialog and the card's own region need a trip that *holds* landmark context, which means
+ * either a Wikidata and Commons fixture server or a hand-authored sidecar entry that passes `validateIntelligence`
+ * in persist mode. Neither exists yet. Their state and copy decisions are covered exhaustively by
+ * `lib/trip/landmark-panel.test.ts` and `lib/trip/landmark-context.test.ts`; their focus, ARIA and pointer behaviour
+ * is not covered anywhere yet, and pretending otherwise here would be worse than the gap.
+ */
+async function scenarioLandmarkContext(chrome, fixtures) {
+  currentScenario = "Landmark context controls";
+  console.log(`\n▸ ${currentScenario}`);
+
+  const gemini = await startGemini({ mode: "ok" });
+  const wikimedia = await startWikimedia();
+  const server = await startNextServer({
+    ROAMLY_NOMINATIM_BASE_URL: fixtures.nominatim.baseUrl,
+    ROAMLY_OVERPASS_BASE_URL: fixtures.overpass.baseUrl,
+    ROAMLY_VALHALLA_BASE_URL: fixtures.valhalla.baseUrl,
+    GEMINI_API_KEY: "fixture-key",
+    GEMINI_BASE_URL: gemini.baseUrl,
+    GEMINI_MODEL: "gemini-fixture",
+    /* Every Wikimedia endpoint, in one object, so none can be left pointing upstream. */
+    ...wikimedia.env,
+  });
+  const page = await openPage(chrome.port, "about:blank");
+
+  try {
+    /*
+     * Belt and braces. `wikimedia.env` keeps the *server* off the network; this keeps the *browser* off it, which
+     * matters for the one URL the server does not fetch — a thumbnail, which a card renders as an `<img src>`.
+     */
+    await page.send("Network.setBlockedURLs", {
+      urls: ["*wikidata.org*", "*wikipedia.org*", "*wikimedia.org*"],
+    });
+
+    await page.goto(`${server.baseUrl}/`);
+
+    /*
+     * The enrich counter is installed *before* the trip exists, so it covers the workspace's whole lifetime —
+     * including its mount. Patching after the workspace rendered would leave exactly the window the claim is about.
+     */
+    await page.waitFor(`window.__roamlyTripStore !== undefined`, {
+      timeoutMs: 30_000,
+      label: "client hydration",
+    });
+    await page.evaluate(`
+      window.__enrichCalls = 0;
+      const original = window.fetch;
+      window.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : (input?.url ?? "");
+        if (url.includes("/api/place-intelligence/enrich")) window.__enrichCalls += 1;
+        return original(input, init);
+      };
+      return true;
+    `);
+
+    await submitForm(page);
+    await chooseFirstDestination(page);
+    await page.click('[data-testid="generate-with-ai"]');
+    await waitForWorkspace(page);
+
+    await page.waitFor(
+      `document.querySelector('[data-testid="landmark-controls"]')`,
+      { timeoutMs: 30_000, label: "the landmark panel" },
+    );
+
+    const tripId = Object.keys(await readStore(page))[0];
+
+    /* -- nothing happens until somebody asks -------------------------------- */
+
+    await expect("opening a trip sends no landmark request", async () => {
+      /* Long enough for a mount effect, a hover and a settle to have happened if any were going to. */
+      await page.sleep(1500);
+      const calls = await page.evaluate(`return window.__enrichCalls;`);
+      return calls === 0 ? true : `${calls} request(s)`;
+    });
+
+    await expect("and stores no landmark context of its own accord", async () => {
+      const store = await readStore(page);
+      const sidecar = store[tripId].intelligence;
+      return sidecar === null || sidecar === undefined
+        ? true
+        : "a sidecar exists before anything was pressed";
+    });
+
+    await expect("and shows no progress figures before a run", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-progress"]') === null`,
+      ),
+    );
+
+    /* -- the add state ------------------------------------------------------ */
+
+    await expect("the panel offers to add landmark photos and context", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-controls"]').textContent.includes("Add landmark photos and context")`,
+      ),
+    );
+
+    await expect("the button names the enrich action", () =>
+      page.check(
+        `document.querySelector('[data-testid="run-landmarks"]').dataset.action === "enrich"`,
+      ),
+    );
+
+    await expect("nothing offers to clear a trip with nothing in it", () =>
+      page.check(
+        `document.querySelector('[data-testid="clear-landmarks"]') === null`,
+      ),
+    );
+
+    /**
+     * The standing explanation, in full.
+     *
+     * Checked as five separate claims rather than as one string so a failure names which one went missing — and the
+     * last of them is the promise this feature exists to keep.
+     */
+    await expect("the panel states its scope and its limits", () =>
+      page.evaluate(`
+        const text = document.querySelector('[data-testid="landmark-controls"]').textContent;
+        const claims = [
+          "Wikidata and Wikimedia Commons",
+          "Restaurants and ordinary hotels are not queried",
+          "Results may be incomplete",
+          "Images include licence and attribution",
+          "Ratings and reviews are not added",
+        ];
+        const missing = claims.filter((claim) => !text.includes(claim));
+        return missing.length === 0 ? true : "missing: " + missing.join(", ");
+      `),
+    );
+
+    /* -- offline ------------------------------------------------------------ */
+
+    await expect("going offline disables the lookup", async () => {
+      await page.evaluate(`
+        Object.defineProperty(navigator, "onLine", { get: () => false, configurable: true });
+        window.dispatchEvent(new Event("offline"));
+        return true;
+      `);
+      await page.waitFor(
+        `document.querySelector('[data-testid="run-landmarks"]').disabled === true`,
+        { label: "the lookup to disable itself" },
+      );
+      return true;
+    });
+
+    await expect("and says which services it needs, in a visible reason", () =>
+      page.evaluate(`
+        const button = document.querySelector('[data-testid="run-landmarks"]');
+        const reason = document.getElementById(button.getAttribute("aria-describedby"));
+        if (!reason) return "the button describes no reason";
+        return reason.textContent.includes("Wikidata")
+          && reason.textContent.includes("Wikimedia Commons")
+          ? true
+          : reason.textContent;
+      `),
+    );
+
+    /** The reason is a paragraph in the page, not a `title`. Hover-only text is unreachable on touch. */
+    await expect("and the reason is not hidden behind a hover", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-disabled-reason"]').offsetParent !== null
+         && !document.querySelector('[data-testid="run-landmarks"]').hasAttribute("title")`,
+      ),
+    );
+
+    await expect("reconnecting makes it pressable again", async () => {
+      await page.evaluate(`
+        Object.defineProperty(navigator, "onLine", { get: () => true, configurable: true });
+        window.dispatchEvent(new Event("online"));
+        return true;
+      `);
+      await page.waitFor(
+        `document.querySelector('[data-testid="run-landmarks"]').disabled === false`,
+        { label: "the lookup to re-enable itself" },
+      );
+      return true;
+    });
+
+    /* -- one explicit lookup ------------------------------------------------ */
+
+    const revisionBeforeRun = (await readStore(page))[tripId].revision;
+
+    await expect("pressing the button runs exactly one lookup", async () => {
+      await page.click('[data-testid="run-landmarks"]');
+      await page.waitFor(
+        `["complete","partial","empty","failed","conflict"].includes(
+           document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus
+         )`,
+        { timeoutMs: 60_000, label: "the lookup to settle" },
+      );
+      const calls = await page.evaluate(`return window.__enrichCalls;`);
+      return calls === 1 ? true : `${calls} request(s)`;
+    });
+
+    /**
+     * The honest empty outcome.
+     *
+     * These places have no Wikidata entity to find, which is the ordinary case for most of the world. The sentence
+     * must be about the encyclopaedia's coverage and not about the places.
+     */
+    await expect(
+      "and reports what was not found without disparaging the trip",
+      () =>
+        page.evaluate(`
+        const outcome = document.querySelector('[data-testid="landmark-outcome"]');
+        if (!outcome) return "no outcome was reported";
+        const text = outcome.textContent.toLowerCase();
+        const forbidden = ["fake", "invalid", "does not exist", "closed", "deleted",
+          "could not be verified", "unverified", "wrong", "incorrect"];
+        const found = forbidden.filter((word) => text.includes(word));
+        return found.length === 0 ? true : "says: " + found.join(", ");
+      `),
+    );
+
+    await expect("and names no status code, host or configuration value", () =>
+      page.evaluate(`
+        const text = document.querySelector('[data-testid="landmark-outcome"]').textContent;
+        if (/\\b(4\\d\\d|5\\d\\d)\\b/.test(text)) return "contains a status code";
+        if (/https?:\\/\\//.test(text)) return "contains a URL";
+        if (/ROAMLY_|process\\.env/.test(text)) return "names a configuration value";
+        return true;
+      `),
+    );
+
+    await expect("and writes nothing to the trip when nothing was found", async () => {
+      const store = await readStore(page);
+      const sidecar = store[tripId].intelligence;
+      if (store[tripId].revision !== revisionBeforeRun) return "the revision moved";
+      return sidecar === null || sidecar === undefined
+        ? true
+        : "a sidecar was written for an empty result";
+    });
+
+    /* -- the progress figures ---------------------------------------------- */
+
+    await expect("the progress region reports the exact counts", () =>
+      page.evaluate(`
+        const region = document.querySelector('[data-testid="landmark-progress"]');
+        if (!region) return "no progress region";
+        const total = Number(region.dataset.total);
+        const checked = Number(region.dataset.checked);
+        const matched = Number(region.dataset.matched);
+        if (!(total > 0)) return "total is " + region.dataset.total;
+        if (checked > total) return checked + " checked of " + total;
+        if (matched !== 0) return "claims " + matched + " matched";
+        return region.textContent.includes(checked + " of " + total) ? true : region.textContent;
+      `),
+    );
+
+    /** Completed, never "current". A count of the past cannot promise a request that may not happen. */
+    await expect("and labels the call count as completed requests", () =>
+      page.evaluate(`
+        const line = document.querySelector('[data-testid="landmark-call-line"]').textContent;
+        if (!line.includes("requests completed")) return line;
+        return /current|in progress/i.test(line) ? line : true;
+      `),
+    );
+
+    await expect("and never shows a full bar while places are unresolved", () =>
+      page.evaluate(`
+        const region = document.querySelector('[data-testid="landmark-progress"]');
+        const percent = Number(region.dataset.percent);
+        const unresolved = Number(region.dataset.unresolved);
+        if (unresolved > 0 && percent >= 100) return "100% with " + unresolved + " unresolved";
+        return percent >= 0 && percent <= 100 ? true : "percent is " + percent;
+      `),
+    );
+
+    await expect("and offers no Cancel once the run has settled", () =>
+      page.check(
+        `document.querySelector('[data-testid="cancel-landmarks"]') === null`,
+      ),
+    );
+
+    /* -- accessibility ----------------------------------------------------- */
+
+    await expect("the panel announces its state politely, in one region", () =>
+      page.evaluate(`
+        const regions = document.querySelectorAll('[data-testid="landmark-controls"] [aria-live]');
+        if (regions.length !== 1) return regions.length + " live regions";
+        return regions[0].getAttribute("aria-live") === "polite"
+          ? true
+          : regions[0].getAttribute("aria-live");
+      `),
+    );
+
+    await expect("the progress bar carries its value as text as well", () =>
+      page.evaluate(`
+        const bar = document.querySelector('[data-testid="landmark-progress"] [role="progressbar"]');
+        if (!bar) return "no progressbar";
+        const text = bar.getAttribute("aria-valuetext") ?? "";
+        return bar.hasAttribute("aria-valuenow") && text.includes("checked")
+          ? true
+          : "valuetext is " + text;
+      `),
+    );
+
+    await expect("the panel's heading names the region it labels", () =>
+      page.evaluate(`
+        const section = document.querySelector('[data-testid="landmark-controls"]');
+        const heading = document.getElementById(section.getAttribute("aria-labelledby"));
+        return heading && heading.textContent.trim().length > 0
+          ? true
+          : "the section has no heading";
+      `),
+    );
+
+    await expect("every control in the panel keeps a stable name", () =>
+      page.evaluate(`
+        const buttons = [...document.querySelectorAll('[data-testid="landmark-controls"] button')];
+        const unnamed = buttons.filter(
+          (button) => (button.getAttribute("aria-label") ?? button.textContent).trim().length === 0,
+        );
+        return unnamed.length === 0 ? true : unnamed.length + " unnamed control(s)";
+      `),
+    );
+
+    /* -- the itinerary is unchanged ---------------------------------------- */
+
+    /**
+     * A lookup that found nothing must leave no trace on the cards.
+     *
+     * The region is absent rather than empty — an enrichment heading over no content is the "empty shell" this
+     * checkpoint forbids, and it is the shape a `&&` on the wrong field produces.
+     */
+    await expect("no card grows an empty landmark region", () =>
+      page.check(
+        `document.querySelector('[data-testid="item-landmark"]') === null
+         && document.querySelector('[data-testid="landmark-context"]') === null`,
+      ),
+    );
+
+    await expect("each card still has exactly one selection control", () =>
+      page.evaluate(`
+        const cards = [...document.querySelectorAll('[data-testid="itinerary-item"]')];
+        const wrong = cards.filter(
+          (card) => card.querySelectorAll('[data-testid="select-stop"]').length !== 1,
+        );
+        return wrong.length === 0 ? true : wrong.length + " card(s) with the wrong count";
+      `),
+    );
+
+    await expect("and selecting a card still works", async () => {
+      const itemId = await page.evaluate(`
+        return document.querySelector('[data-testid="itinerary-item"]').dataset.itemId;
+      `);
+      await page.click(`[data-testid="select-stop"][data-item-id="${itemId}"]`);
+      /* Waited for rather than read straight after the click: React has not committed in the same tick. */
+      await page.waitFor(
+        `document.querySelector('[data-item-id="${itemId}"][data-testid="itinerary-item"]').dataset.selected === "true"`,
+        { label: "the card to read as selected" },
+      );
+      return true;
+    });
+
+    await expect("the editing controls are still where they were", () =>
+      page.check(
+        `document.querySelector('[data-testid="edit-time"]') !== null
+         && document.querySelector('[data-testid="remove-stop"]') !== null`,
+      ),
+    );
+
+    /* -- the surface ------------------------------------------------------- */
+
+    await expect("the page never scrolls sideways", () =>
+      noHorizontalOverflow(page),
+    );
+
+    await expect("the panel is usable on a narrow screen", async () => {
+      await page.send("Emulation.setDeviceMetricsOverride", {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: 2,
+        mobile: true,
+      });
+      await page.sleep(400);
+
+      const usable = await page.check(
+        `document.querySelector('[data-testid="run-landmarks"]').getBoundingClientRect().width > 0`,
+      );
+      const fits = await noHorizontalOverflow(page);
+
+      await page.send("Emulation.clearDeviceMetricsOverride");
+      return usable && fits;
+    });
+
+    await expect("no console errors or hydration warnings were logged", () => {
+      const problems = consoleProblems(page);
+      return problems.length === 0 ? true : problems.join(" | ");
+    });
+  } finally {
+    await page.close();
+    await server.close();
+    await closeAll([gemini, wikimedia]);
+  }
+}
+
 async function main() {
   const chrome = await launchChrome();
   console.log(`Chrome: ${chrome.version["User-Agent"]}`);
@@ -3957,6 +4372,7 @@ async function main() {
     await scenarioScheduleAndCosts(chrome, fixtures);
     await scenarioStructuralEdits(chrome, fixtures);
     await scenarioEditingControls(chrome, fixtures);
+    await scenarioLandmarkContext(chrome, fixtures);
     await scenarioRefinementRefused(chrome, fixtures);
   } finally {
     await closeAll([nominatim, overpass, valhalla, gemini]);
