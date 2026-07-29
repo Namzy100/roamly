@@ -434,7 +434,11 @@ function withLocalFilePage(body, baseUrl) {
  * unobservable, so cancellation could not be verified at all — the behaviour under test only exists while a request
  * is outstanding.
  */
-export async function startWikimedia({ mode = "empty", delayMs = 0 } = {}) {
+export async function startWikimedia({
+  mode = "empty",
+  delayMs = 0,
+  allowFixtureUrls = true,
+} = {}) {
   const state = { requests: 0, paths: [], entity: 0, commons: 0, sparql: 0 };
 
   /*
@@ -522,6 +526,29 @@ export async function startWikimedia({ mode = "empty", delayMs = 0 } = {}) {
       ROAMLY_WIKIDATA_ENTITY_BASE_URL: `${baseUrl}/wiki/Special:EntityData`,
       ROAMLY_COMMONS_API_URL: `${baseUrl}/commons/w/api.php`,
       ROAMLY_WIKIPEDIA_API_URL_TEMPLATE: `${baseUrl}/{lang}/w/api.php`,
+      /*
+       * The private server-side allowance, in the same object as the endpoints it depends on.
+       *
+       * Media is fetched and licence-checked *during enrichment*, in Node, under `next dev` — so without this the
+       * thumbnail is refused server-side and no photograph is ever stored, whatever the client bundle permits. That was
+       * the exact cause of the media path being uncoverable: the public pair below fixed the browser half of the gate and
+       * left this half untouched.
+       *
+       * `fixture-origin.ts` requires every one of the five endpoints above to be on this origin before it honours the
+       * flag, which is why these live together: a scenario cannot acquire the HTTP allowance while one endpoint still
+       * points at real Wikimedia. It also requires `NODE_ENV === "development"` and the absence of every deployment
+       * marker, so `next build`, `next start` and any hosted process refuse regardless of this variable.
+       *
+       * `allowFixtureUrls: false` withholds the three, keeping the endpoints redirected. That is how a scenario proves
+       * the same stored record is refused when the allowance is absent.
+       */
+      ...(allowFixtureUrls
+        ? {
+            ROAMLY_BROWSER_FIXTURE_RUN: "1",
+            ROAMLY_WIKIMEDIA_FIXTURE_MODE: "1",
+            ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN: baseUrl,
+          }
+        : {}),
     },
     /**
      * The build-time pair that lets a stored fixture URL survive validation in the browser.

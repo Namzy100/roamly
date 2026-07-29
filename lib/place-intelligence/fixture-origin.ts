@@ -17,12 +17,19 @@
  * private variables to `next dev` changed nothing, because a variable without a `NEXT_PUBLIC_` prefix does not exist
  * in a client bundle at all.
  *
- * Hence two branches with two separate sets of variables, and no way for one to satisfy the other:
+ * Hence separate branches with separate sets of variables, and no way for one to satisfy another:
  *
- *  - **Node** — `NODE_ENV === "test"` plus the private `ROAMLY_WIKIMEDIA_FIXTURE_*` pair. Unchanged, and unreachable
- *    from a browser because `window` decides which branch runs.
+ *  - **Node, unit test** — `NODE_ENV === "test"` plus the private `ROAMLY_WIKIMEDIA_FIXTURE_*` pair. Unreachable from a
+ *    browser because `window` decides which branch runs.
+ *  - **Node, browser harness** — `NODE_ENV === "development"` plus `ROAMLY_BROWSER_FIXTURE_RUN`, and every Wikimedia
+ *    endpoint redirected onto the fixture, and no deployment marker anywhere. This one exists because enrichment fetches
+ *    and licence-checks media *server-side* under `next dev`, which the unit-test branch refuses; see
+ *    `browserHarnessFixtureOrigin` for why the two alternatives were worse.
  *  - **Browser** — the public `NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_*` pair, *and* the page itself must be served from
  *    loopback.
+ *
+ * The public pair is irrelevant to both Node branches, and the private variables are invisible to the browser one. That
+ * is not a convention to be respected by callers; it is what `typeof window` selecting the branch actually enforces.
  *
  * ## The page-origin condition is what makes the public pair safe
  *
@@ -85,17 +92,148 @@ function parseFixtureOrigin(configured: string | undefined): string | null {
 }
 
 /**
- * The Node-side allowance: a test process that has explicitly asked.
+ * The Node-side unit-test allowance: a test process that has explicitly asked.
  *
  * `NODE_ENV === "test"` is the part a build cannot forge — `next build` and `next dev` both set it themselves — and the
  * private flag is the part that stops every other unit test silently gaining the ability. Being under test is not
  * consent.
  */
-function serverFixtureOrigin(): string | null {
+function unitTestFixtureOrigin(): string | null {
   if (process.env.NODE_ENV !== "test") return null;
   if (process.env.ROAMLY_WIKIMEDIA_FIXTURE_MODE !== "1") return null;
 
   return parseFixtureOrigin(process.env.ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN);
+}
+
+/**
+ * Every Wikimedia endpoint the adapter can reach, named as the variable that overrides it.
+ *
+ * The list exists so the harness allowance can require that *all* of them point at the fixture. An endpoint left unset
+ * falls back to its official HTTPS default in `config.ts`, which means a run that believed it was isolated would in fact
+ * reach volunteer infrastructure for that one call — and the allowance would have granted an HTTP exception to a run
+ * that was talking to the real internet. Refusing unless every one is redirected makes "isolated" checkable rather than
+ * assumed.
+ *
+ * Named here rather than imported from `config.ts` because `config.ts` imports *this* module, and because the values
+ * there are resolved constants with the defaults already substituted — by then an unset variable is indistinguishable
+ * from one deliberately set to the official URL.
+ */
+const WIKIMEDIA_ENDPOINT_KEYS = [
+  "ROAMLY_WIKIDATA_ENTITY_BASE_URL",
+  "ROAMLY_WIKIDATA_API_URL",
+  "ROAMLY_WIKIDATA_SPARQL_URL",
+  "ROAMLY_COMMONS_API_URL",
+  "ROAMLY_WIKIPEDIA_API_URL_TEMPLATE",
+] as const;
+
+/**
+ * Variables whose mere presence means "this is a deployment", not a developer's machine.
+ *
+ * Checked as absent-or-empty rather than compared against a value: the question is whether anything hosted is around
+ * us, and a marker set to an unexpected string is still a marker. `VERCEL` and `VERCEL_ENV` are the two the deployment
+ * target actually sets; the rest are here so the same rule holds if Roamly is ever hosted somewhere else, since the
+ * failure mode being prevented — an HTTP allowance active in a serving environment — does not care which vendor it is.
+ *
+ * This is a belt to `NODE_ENV === "development"`'s braces. That check alone already excludes `next build` and
+ * `next start`, which is the strong guarantee; this one catches a hosted process that somehow reports development.
+ */
+const DEPLOYMENT_MARKER_KEYS = [
+  "VERCEL",
+  "VERCEL_ENV",
+  "VERCEL_URL",
+  "AWS_LAMBDA_FUNCTION_NAME",
+  "AWS_EXECUTION_ENV",
+  "NETLIFY",
+  "CF_PAGES",
+  "RENDER",
+  "FLY_APP_NAME",
+  "HEROKU_APP_NAME",
+  "K_SERVICE",
+] as const;
+
+/**
+ * Whether every Wikimedia endpoint has been redirected onto this exact origin.
+ *
+ * `{lang}` is substituted before parsing because the Wikipedia entry is a template rather than a URL; the substituted
+ * language is irrelevant, since only the origin is compared and the template's origin does not vary by language.
+ *
+ * An unparseable value fails, as does one on a different origin. Both are configuration mistakes that would otherwise
+ * present as a mysteriously refused thumbnail.
+ */
+function everyWikimediaEndpointIsFixture(origin: string): boolean {
+  for (const key of WIKIMEDIA_ENDPOINT_KEYS) {
+    const configured = process.env[key];
+    if (!configured) return false;
+
+    try {
+      if (new URL(configured.replace("{lang}", "en")).origin !== origin) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * The Node-side browser-harness allowance: `next dev`, started by the browser suite, talking only to the fixture.
+ *
+ * ## Why a second Node branch was needed at all
+ *
+ * The sidecar's media is fetched and licence-checked *on the server*, during enrichment, before the client ever sees
+ * it. So `mediaHostIsAllowed` runs in Node under `next dev` — where `NODE_ENV` is `development`, which the unit-test
+ * branch above correctly refuses. The consequence was measured rather than guessed: the browser suite wired the public
+ * pair, fixed the client half of the gate, and the thumbnail was still refused server-side, so no photograph could be
+ * exercised end to end and the media checks were pinned to "no media" instead.
+ *
+ * The two alternatives were both worse. Making the Node branch trust the *public* pair would put a bundle-compiled
+ * value in charge of a server decision, which is the one thing the public pair was designed never to do. Running the
+ * harness with `NODE_ENV=test` would tell Next it was under test, changing bundling and error handling, so the suite
+ * would no longer be exercising the application it claims to verify.
+ *
+ * ## Why this flag cannot leak
+ *
+ * `ROAMLY_BROWSER_FIXTURE_RUN` is private, so it does not exist in a client bundle and cannot be set by a page. It is
+ * set by `test/browser/run.mjs` immediately before it spawns `next dev`, and by nothing else — not by `npm run build`,
+ * not by `npm start`, and not by the production smoke test.
+ *
+ * Every condition below has to hold at once, and each closes a different way this could have been the wrong answer:
+ * the explicit flag (nobody gets it by accident), fixture mode (the same second opt-in the unit-test branch requires),
+ * `development` (`next build` and `next start` report `production`, so a real serving process is excluded by the
+ * runtime itself rather than by a list), no deployment marker, a well-formed loopback origin with an explicit port, and
+ * every endpoint redirected onto it.
+ */
+function browserHarnessFixtureOrigin(): string | null {
+  if (process.env.ROAMLY_BROWSER_FIXTURE_RUN !== "1") return null;
+  if (process.env.ROAMLY_WIKIMEDIA_FIXTURE_MODE !== "1") return null;
+
+  /* `next build` and `next start` both report `production`. A served application cannot reach past this line. */
+  if (process.env.NODE_ENV !== "development") return null;
+
+  for (const key of DEPLOYMENT_MARKER_KEYS) {
+    if ((process.env[key] ?? "") !== "") return null;
+  }
+
+  const origin = parseFixtureOrigin(process.env.ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN);
+  if (!origin) return null;
+
+  /* Isolation is a precondition of the allowance, not a separate hope. */
+  if (!everyWikimediaEndpointIsFixture(origin)) return null;
+
+  return origin;
+}
+
+/**
+ * The Node-side allowance: either a unit-test process or the browser harness.
+ *
+ * Two disjoint modes rather than one relaxed one. They cannot be collapsed into a single set of conditions because they
+ * disagree about `NODE_ENV` — `test` against `development` — which is precisely the distinction that keeps each of them
+ * narrow.
+ */
+function serverFixtureOrigin(): string | null {
+  return unitTestFixtureOrigin() ?? browserHarnessFixtureOrigin();
 }
 
 /**
