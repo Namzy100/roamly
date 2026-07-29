@@ -127,6 +127,8 @@ export async function startNextServer(env) {
 
   return {
     baseUrl,
+    /** What this server was actually started with, so a scenario can assert its own configuration. */
+    env,
     log: () => log,
     async close() {
       child.kill("SIGTERM");
@@ -4274,6 +4276,513 @@ async function scenarioLandmarkContext(chrome, fixtures) {
   }
 }
 
+/**
+ * A trip that actually receives landmark context (Checkpoint 5B, sections 10C and 12).
+ *
+ * ## The whole path, for real
+ *
+ * One Overpass element carries a `wikidata` tag, so `planWikidataLookup` returns a direct-QID plan — rank 3, a shared
+ * external id, the only rung whose facts may be displayed. From there the real route, the real adapter and the real
+ * store run end to end: entity fetched and normalized, facts built, the Commons file fetched and licence-checked, one
+ * guarded save, and a card derived from the stored sidecar.
+ *
+ * Nothing on that path is stubbed except the four Wikimedia endpoints, which answer with the adapter's own fixture
+ * bodies. That matters more here than anywhere else in the suite: a hand-written sidecar would prove the card can
+ * render *something*, where this proves the thing it renders survived normalization, validation, the trust gate, the
+ * licence gate and a round trip through storage.
+ *
+ * ## The media path is *not* covered, and that is stated rather than implied
+ *
+ * The Commons request goes out to the fixture and the canned `IMAGEINFO_LICENSED_RASTER` body is refused by
+ * `media.ts`, so nothing is stored under `media` and no photograph renders. The cause has not been isolated: the file
+ * page URL was rewritten onto the fixture origin to satisfy the same-origin rule, and the subject was aligned with the
+ * fixture's file title, and neither was sufficient.
+ *
+ * So the checks below pin what the fixture genuinely produces — facts and a description with no media and, crucially,
+ * no empty box reserved where a photograph would have gone. What remains uncovered anywhere is a *displayed*
+ * photograph: its lazy loading, its exact licence line, its creator and file-page links, and the load-failure path.
+ * Those are asserted in `lib/trip/landmark-context.test.ts` at the composition level and nowhere in a browser.
+ */
+async function scenarioEnrichedLandmark(chrome, fixtures) {
+  currentScenario = "Landmark context on a card";
+  console.log(`\n▸ ${currentScenario}`);
+
+  const gemini = await startGemini({ mode: "ok" });
+  const overpass = await startOverpass({ landmark: true });
+  const wikimedia = await startWikimedia({ mode: "accepted" });
+  const server = await startNextServer({
+    ROAMLY_NOMINATIM_BASE_URL: fixtures.nominatim.baseUrl,
+    ROAMLY_OVERPASS_BASE_URL: overpass.baseUrl,
+    ROAMLY_VALHALLA_BASE_URL: fixtures.valhalla.baseUrl,
+    GEMINI_API_KEY: "fixture-key",
+    GEMINI_BASE_URL: gemini.baseUrl,
+    GEMINI_MODEL: "gemini-fixture",
+    ...wikimedia.env,
+    /*
+     * The public pair, which is what lets a *stored* fixture thumbnail survive validation.
+     *
+     * The sidecar is saved by the client, so `urlIsSafe` runs in the browser bundle — where a variable without a
+     * `NEXT_PUBLIC_` prefix does not exist at all. That was measured: passing only the private pair changed nothing.
+     * These are set before the server is spawned because Next compiles `NEXT_PUBLIC_*` values into the bundle, and a
+     * value assigned afterwards would be a value the page never sees.
+     *
+     * The allowance still cannot activate off this machine: `fixture-origin.ts` also requires the page's own hostname
+     * to be loopback, which no deployment can satisfy however its environment is configured.
+     */
+    ...wikimedia.publicEnv,
+  });
+  const page = await openPage(chrome.port, "about:blank");
+
+  try {
+    /*
+     * Incomplete fixture configuration fails here rather than sixteen checks later.
+     *
+     * Every one of these has to be in place *before* Next compiled the bundle. A missing public origin does not error —
+     * it silently disables the allowance, the thumbnail is refused, and the media checks fail with "no media stored",
+     * which reads as a product bug rather than as a harness mistake. This is that distinction, made once.
+     */
+    const required = [
+      ["NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_MODE", "1"],
+      ["NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN", wikimedia.baseUrl],
+      ["ROAMLY_WIKIDATA_SPARQL_URL", wikimedia.env.ROAMLY_WIKIDATA_SPARQL_URL],
+      ["ROAMLY_COMMONS_API_URL", wikimedia.env.ROAMLY_COMMONS_API_URL],
+    ];
+    const missing = required.filter(
+      ([key, value]) => (server.env?.[key] ?? null) !== value,
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `fixture configuration incomplete: ${missing.map(([key]) => key).join(", ")}`,
+      );
+    }
+
+    await page.send("Network.setBlockedURLs", {
+      urls: ["*wikidata.org*", "*wikipedia.org*", "*wikimedia.org*"],
+    });
+
+    await page.goto(`${server.baseUrl}/`);
+    await submitForm(page);
+    await chooseFirstDestination(page);
+    await page.click('[data-testid="generate-with-ai"]');
+    await waitForWorkspace(page);
+    await page.waitFor(
+      `document.querySelector('[data-testid="landmark-controls"]')`,
+      { timeoutMs: 30_000, label: "the landmark panel" },
+    );
+
+    const tripId = Object.keys(await readStore(page))[0];
+    const revisionBefore = (await readStore(page))[tripId].revision;
+
+    /* -- the lookup finds something ----------------------------------------- */
+
+    await expect(
+      "an explicit lookup finds and saves landmark context",
+      async () => {
+        await page.click('[data-testid="run-landmarks"]');
+        await page.waitFor(
+          `["complete","partial","empty","failed","conflict"].includes(
+             document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus
+           )`,
+          { timeoutMs: 60_000, label: "the lookup to settle" },
+        );
+
+        const status = await page.evaluate(`
+          return document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus;
+        `);
+        if (status !== "complete" && status !== "partial") {
+          return `settled as ${status}`;
+        }
+
+        const store = await readStore(page);
+        const sidecar = store[tripId].intelligence;
+        if (!sidecar) return "nothing was saved";
+        const entries = Object.keys(sidecar.byCanonicalPlaceId ?? {});
+        return entries.length > 0 ? true : "the sidecar holds no entries";
+      },
+    );
+
+    /** The whole point of a guarded atomic save: many requests, one revision. */
+    await expect("and moves the revision exactly once", async () => {
+      const after = (await readStore(page))[tripId].revision;
+      return after === revisionBefore + 1
+        ? true
+        : `${revisionBefore} → ${after}`;
+    });
+
+    await expect("and the panel now offers refresh and clear", () =>
+      page.evaluate(`
+        const run = document.querySelector('[data-testid="run-landmarks"]');
+        if (run.dataset.action !== "refresh") return "primary is " + run.dataset.action;
+        return document.querySelector('[data-testid="clear-landmarks"]') !== null
+          ? true
+          : "no clear control";
+      `),
+    );
+
+    /** The API call count once the lookup has settled. Nothing after this may add to it. */
+    const apiCallsAfterRun =
+      wikimedia.state.entity + wikimedia.state.commons + wikimedia.state.sparql;
+
+    /* -- the card ----------------------------------------------------------- */
+
+    await expect(
+      "a card renders its landmark context under one label",
+      async () => {
+        await page.waitFor(
+          `document.querySelector('[data-testid="landmark-context"]')`,
+          { label: "the card's landmark region" },
+        );
+        return page.evaluate(`
+          const region = document.querySelector('[data-testid="landmark-context"]');
+          const heading = document.getElementById(region.getAttribute("aria-labelledby"));
+          return heading && heading.textContent.includes("Factual context")
+            ? true
+            : "heading is " + (heading ? heading.textContent : "absent");
+        `);
+      },
+    );
+
+    await expect("the description is the stored sentence, as plain text", () =>
+      page.evaluate(`
+        const text = document.querySelector('[data-testid="landmark-description"]');
+        if (!text) return "no description";
+        if (text.querySelector("script")) return "markup was rendered";
+        return text.textContent.trim().length > 0 ? true : "empty description";
+      `),
+    );
+
+    await expect("a date fact renders under “Dates from”", () =>
+      page.evaluate(`
+        const facts = document.querySelector('[data-testid="landmark-facts"]');
+        if (!facts) return "no facts";
+        return facts.textContent.includes("Dates from") ? true : facts.textContent;
+      `),
+    );
+
+    /**
+     * The source line names what actually rendered, and nothing else.
+     *
+     * With no displayable file, "Wikimedia Commons" must be absent: naming it would claim a use that did not happen.
+     * The exact-licence assertion belongs to the accepted-media path, which this suite does not yet reach — see the
+     * note at the top of this scenario.
+     */
+    await expect("the source line names only the projects that rendered", () =>
+      page.evaluate(`
+        const line = document.querySelector('[data-testid="landmark-source-line"]').textContent;
+        if (!line.includes("Wikidata")) return "does not name Wikidata: " + line;
+        const hasPhoto = document.querySelector('[data-testid="landmark-photo"]') !== null;
+        if (!hasPhoto && line.includes("Wikimedia Commons")) return "credits Commons with no file: " + line;
+        return line.includes("Creative Commons") ? "softened a licence" : true;
+      `),
+    );
+
+    await expect("the attribution is available without hover, on demand", () =>
+      page.evaluate(`
+        const details = document.querySelector('[data-testid="landmark-source"]');
+        if (details.tagName !== "DETAILS") return "not a disclosure";
+        if (details.open) return "open before it was asked for";
+        const summary = details.querySelector("summary");
+        return summary && summary.textContent.trim().length > 0 ? true : "no summary";
+      `),
+    );
+
+    await expect("opening the disclosure names its source", async () => {
+      await page.click('[data-testid="landmark-source-line"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="landmark-source"]').open === true`,
+        { label: "the disclosure to open" },
+      );
+      return page.evaluate(`
+        const details = document.querySelector('[data-testid="landmark-source"]');
+        return details.open && details.textContent.includes("Wikidata")
+          ? true
+          : details.textContent;
+      `);
+    });
+
+    /**
+     * The card's selection overlay spans the whole card, so anything interactive above it has to sit outside the
+     * `pointer-events-none` layer. Opening a disclosure is the case that would otherwise select the stop.
+     */
+    await expect("opening the disclosure does not select the card", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-context"]').closest('[data-testid="itinerary-item"]').dataset.selected === "false"`,
+      ),
+    );
+
+    await expect(
+      "the card still has exactly one control carrying aria-pressed",
+      () =>
+        page.evaluate(`
+          const card = document.querySelector('[data-testid="landmark-context"]').closest('[data-testid="itinerary-item"]');
+          const count = card.querySelectorAll("[aria-pressed]").length;
+          return count === 1 ? true : count + " controls";
+        `),
+    );
+
+    await expect("no interactive element is nested inside another", () =>
+      page.evaluate(`
+        const card = document.querySelector('[data-testid="landmark-context"]').closest('[data-testid="itinerary-item"]');
+        const selector = "button, a[href], summary, input, select, textarea";
+        const nested = [...card.querySelectorAll(selector)].filter(
+          (node) => node.parentElement.closest(selector) !== null,
+        );
+        return nested.length === 0 ? true : nested.length + " nested control(s)";
+      `),
+    );
+
+    /* -- no media, and no shell where media would have been ----------------- */
+
+    /**
+     * A card with facts and no photograph renders no media at all.
+     *
+     * This is the state the fixture produces today: the Commons body is fetched and refused, so `photo` is `null`. The
+     * refusal happens **server-side**, in `mediaHostIsAllowed` inside the enrich route, where the fixture allowance
+     * needs `NODE_ENV === "test"` — and `next dev` reports `development`. Wiring the public browser pair fixed the
+     * client half of the gate and left this half untouched.
+     *
+     * The property worth pinning meanwhile is that nothing is reserved for the missing image: a fixed-ratio box with no
+     * image in it reads as a photograph that failed to load, which is the "empty media shell" this checkpoint forbids.
+     */
+    await expect("a card with no displayable file renders no media shell", () =>
+      page.evaluate(`
+        const region = document.querySelector('[data-testid="landmark-context"]');
+        if (region.dataset.hasImage !== "false") return "the region claims an image";
+        if (region.querySelector('[data-testid="landmark-photo"]')) return "an image element exists";
+        const reserved = [...region.querySelectorAll("*")].some(
+          (node) => typeof node.className === "string" && node.className.includes("aspect-"),
+        );
+        if (reserved) return "an empty ratio box was reserved";
+        if (!document.querySelector('[data-testid="landmark-description"]')) return "the description is missing";
+        return document.querySelector('[data-testid="landmark-facts"]') !== null
+          ? true
+          : "the facts are missing";
+      `),
+    );
+
+    await expect("and stores no media for a refused file", async () => {
+      const count = await page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        const entries = Object.values(record.intelligence.byCanonicalPlaceId);
+        return entries.flatMap((entry) => entry.media).length;
+      `);
+      return count === 0 ? true : `${count} media record(s) stored`;
+    });
+
+    await expect("and writes nothing extra for the refusal", async () => {
+      const store = await readStore(page);
+      return store[tripId].revision === revisionBefore + 1
+        ? true
+        : "the revision moved on a media refusal";
+    });
+
+    await expect("no provider request happened for the disclosure", () => {
+      const apiCalls =
+        wikimedia.state.entity + wikimedia.state.commons + wikimedia.state.sparql;
+      return apiCalls === apiCallsAfterRun
+        ? true
+        : `${apiCalls} api calls, was ${apiCallsAfterRun}`;
+    });
+
+    await expect("cards without landmark context render no media area", () =>
+      page.evaluate(`
+        const bare = [...document.querySelectorAll('[data-testid="itinerary-item"]')].filter(
+          (card) => card.querySelector('[data-testid="landmark-context"]') === null,
+        );
+        if (bare.length === 0) return "every card has context, so this proves nothing";
+        const offenders = bare.filter(
+          (card) => card.querySelector('[data-testid="item-landmark"]') !== null,
+        );
+        return offenders.length === 0 ? true : offenders.length + " empty region(s)";
+      `),
+    );
+
+    /* -- the clear confirmation -------------------------------------------- */
+
+    await expect("Clear landmark context opens a described dialog", async () => {
+      await page.click('[data-testid="clear-landmarks"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]')`,
+        { label: "the confirmation dialog" },
+      );
+
+      return page.evaluate(`
+        const dialog = document.querySelector('[data-testid="clear-landmarks-dialog"]');
+        if (dialog.getAttribute("role") !== "dialog") return "not a dialog";
+        if (dialog.getAttribute("aria-modal") !== "true") return "not modal";
+        const name = document.getElementById(dialog.getAttribute("aria-labelledby"));
+        const description = document.getElementById(dialog.getAttribute("aria-describedby"));
+        if (!name || name.textContent.trim().length === 0) return "no accessible name";
+        if (!description || description.textContent.trim().length === 0) return "no description";
+        return description.textContent.includes("only") ? true : "the scope is not stated";
+      `);
+    });
+
+    await expect("focus starts inside the dialog, on the safe choice", () =>
+      page.check(
+        `document.activeElement === document.querySelector('[data-testid="clear-landmarks-cancel"]')`,
+      ),
+    );
+
+    await expect("Tab stays inside the dialog", async () => {
+      for (let press = 0; press < 4; press += 1) await page.press("Tab");
+      return page.check(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]').contains(document.activeElement)`,
+      );
+    });
+
+    await expect("Shift+Tab stays inside the dialog", async () => {
+      for (let press = 0; press < 4; press += 1) {
+        for (const type of ["keyDown", "keyUp"]) {
+          await page.send("Input.dispatchKeyEvent", {
+            type,
+            key: "Tab",
+            code: "Tab",
+            windowsVirtualKeyCode: 9,
+            modifiers: 8,
+          });
+        }
+      }
+      return page.check(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]').contains(document.activeElement)`,
+      );
+    });
+
+    await expect("Escape closes it and keeps the context", async () => {
+      await page.press("Escape");
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]') === null`,
+        { label: "the dialog to close" },
+      );
+      const store = await readStore(page);
+      return store[tripId].intelligence ? true : "the context was cleared";
+    });
+
+    await expect("closing returns focus to the Clear trigger", () =>
+      page.check(
+        `document.activeElement === document.querySelector('[data-testid="clear-landmarks"]')`,
+      ),
+    );
+
+    /*
+     * Its own open-and-close cycle, rather than sharing the one above.
+     *
+     * A device-metrics override moves focus, so folding this in alongside the focus checks made the focus-restoration
+     * assertion fail for a reason that had nothing to do with the dialog.
+     */
+    await expect("the dialog fits a narrow screen", async () => {
+      await page.click('[data-testid="clear-landmarks"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]')`,
+        { label: "the dialog at mobile width" },
+      );
+
+      await page.send("Emulation.setDeviceMetricsOverride", {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: 2,
+        mobile: true,
+      });
+      await page.sleep(400);
+      const fits = await noHorizontalOverflow(page);
+      await page.send("Emulation.clearDeviceMetricsOverride");
+      await page.sleep(200);
+
+      await page.press("Escape");
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]') === null`,
+        { label: "the mobile dialog to close" },
+      );
+      return fits;
+    });
+
+    await expect("cancelling writes nothing", async () => {
+      await page.click('[data-testid="clear-landmarks"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]')`,
+        { label: "the dialog again" },
+      );
+      await page.click('[data-testid="clear-landmarks-cancel"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]') === null`,
+        { label: "the dialog to close" },
+      );
+
+      const store = await readStore(page);
+      if (!store[tripId].intelligence) return "the context was cleared";
+      return store[tripId].revision === revisionBefore + 1
+        ? true
+        : "the revision moved";
+    });
+
+    /**
+     * Confirming clears the landmark context and *only* that.
+     *
+     * The plan and the generation context are compared byte for byte before and after, because "removes only the
+     * landmark photos and context" is a promise the dialog makes in so many words.
+     */
+    await expect("confirming clears the context and nothing else", async () => {
+      const before = await page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        return JSON.stringify({ plan: record.plan, generation: record.generation ?? null });
+      `);
+
+      await page.click('[data-testid="clear-landmarks"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]')`,
+        { label: "the dialog a third time" },
+      );
+      await page.click('[data-testid="clear-landmarks-confirm"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="clear-landmarks-dialog"]') === null`,
+        { label: "the dialog to close after confirming" },
+      );
+
+      const store = await readStore(page);
+      if (store[tripId].intelligence) return "the context is still there";
+
+      const after = await page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        return JSON.stringify({ plan: record.plan, generation: record.generation ?? null });
+      `);
+      if (after !== before) return "the plan or the generation context changed";
+
+      return store[tripId].revision === revisionBefore + 2
+        ? true
+        : `revision is ${store[tripId].revision}`;
+    });
+
+    await expect("and the cards lose their landmark regions with it", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-context"]') === null
+         && document.querySelector('[data-testid="item-landmark"]') === null`,
+      ),
+    );
+
+    await expect("and the panel offers to add context again", () =>
+      page.check(
+        `document.querySelector('[data-testid="run-landmarks"]').dataset.action === "enrich"
+         && document.querySelector('[data-testid="clear-landmarks"]') === null`,
+      ),
+    );
+
+    /* -- the surface ------------------------------------------------------- */
+
+    await expect("the page never scrolls sideways", () =>
+      noHorizontalOverflow(page),
+    );
+
+    await expect("no console errors or hydration warnings were logged", () => {
+      const problems = consoleProblems(page);
+      return problems.length === 0 ? true : problems.join(" | ");
+    });
+  } finally {
+    await page.close();
+    await server.close();
+    await closeAll([gemini, overpass, wikimedia]);
+  }
+}
+
 async function main() {
   const chrome = await launchChrome();
   console.log(`Chrome: ${chrome.version["User-Agent"]}`);
@@ -4373,6 +4882,7 @@ async function main() {
     await scenarioStructuralEdits(chrome, fixtures);
     await scenarioEditingControls(chrome, fixtures);
     await scenarioLandmarkContext(chrome, fixtures);
+    await scenarioEnrichedLandmark(chrome, fixtures);
     await scenarioRefinementRefused(chrome, fixtures);
   } finally {
     await closeAll([nominatim, overpass, valhalla, gemini]);

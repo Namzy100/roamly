@@ -8,7 +8,7 @@ import {
   Loader2,
   Trash2,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useOnlineStatus } from "@/lib/hooks/use-online-status";
@@ -62,6 +62,17 @@ export function LandmarkControls({ tripId }: { tripId: string }) {
 
   /** Whether the confirmation dialog is open. Local, because a dialog is not trip state. */
   const [confirming, setConfirming] = useState(false);
+
+  /**
+   * The Clear trigger, held so focus can be put back on it by name.
+   *
+   * `placement-dialog.tsx` restores focus to whatever `document.activeElement` was during its first render, which is
+   * right for a dialog with several possible openers. This one has exactly one, and naming it proved more reliable: a
+   * pointer press does not focus a button on every platform, so the captured "opener" can be `<body>` — and focus then
+   * lands nowhere when the dialog closes, which is the regression the restore exists to prevent. The browser suite
+   * caught exactly that.
+   */
+  const clearTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const headingId = useId();
   const reasonId = useId();
@@ -171,6 +182,7 @@ export function LandmarkControls({ tripId }: { tripId: string }) {
             <Button
               type="button"
               variant="ghost"
+              ref={clearTriggerRef}
               onClick={() => setConfirming(true)}
               disabled={panel.clear.disabled}
               data-testid="clear-landmarks"
@@ -249,6 +261,7 @@ export function LandmarkControls({ tripId }: { tripId: string }) {
           problem={
             panel.outcome?.tone === "problem" ? panel.outcome.message : null
           }
+          returnFocusTo={clearTriggerRef}
           onCancel={() => setConfirming(false)}
           onConfirm={confirmClear}
         />
@@ -324,11 +337,14 @@ function ProgressRow({
  */
 function ClearLandmarkDialog({
   problem,
+  returnFocusTo,
   onCancel,
   onConfirm,
 }: {
   /** The panel's current problem, shown only after this dialog has actually tried. */
   problem: string | null;
+  /** The control that opened this. Focus goes back to it, by name rather than by guess. */
+  returnFocusTo: RefObject<HTMLButtonElement | null>;
   onCancel: () => void;
   /** Clears, and reports whether it worked. `false` keeps this dialog open with the reason. */
   onConfirm: () => boolean;
@@ -434,13 +450,18 @@ function ClearLandmarkDialog({
     cancelRef.current?.focus();
   }, []);
 
-  /** Focus goes back to the Clear trigger, if it is still there to receive it. */
+  /**
+   * Focus goes back to the Clear trigger, if it is still there to receive it.
+   *
+   * The named trigger first, and `document.activeElement` only as a fallback for the case where the panel has since
+   * stopped rendering a Clear control at all — which is exactly what a *successful* clear does.
+   */
   useEffect(
     () => () => {
-      const opener = openerRef.current;
-      if (opener && document.body.contains(opener)) opener.focus();
+      const target = returnFocusTo.current ?? openerRef.current;
+      if (target && document.body.contains(target)) target.focus();
     },
-    [],
+    [returnFocusTo],
   );
 
   const shownProblem = attempted ? problem : null;

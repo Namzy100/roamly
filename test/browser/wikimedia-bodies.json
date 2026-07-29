@@ -1,0 +1,608 @@
+{
+  "constants": {
+    "qid": "Q243",
+    "labelEn": "Eiffel Tower",
+    "articleEn": "Eiffel Tower",
+    "fileTitle": "File:Tour Eiffel Wikimedia Commons.jpg",
+    "coordinates": {
+      "lat": 48.85837,
+      "lng": 2.294481
+    }
+  },
+  "entityData": {
+    "entities": {
+      "Q243": {
+        "type": "item",
+        "id": "Q243",
+        "labels": {
+          "en": {
+            "language": "en",
+            "value": "Eiffel Tower"
+          },
+          "fr": {
+            "language": "fr",
+            "value": "tour Eiffel"
+          }
+        },
+        "descriptions": {
+          "en": {
+            "language": "en",
+            "value": "tower in Paris, France"
+          },
+          "fr": {
+            "language": "fr",
+            "value": "tour à Paris, France"
+          }
+        },
+        "aliases": {
+          "en": [
+            {
+              "language": "en",
+              "value": "La Tour Eiffel"
+            }
+          ]
+        },
+        "claims": {
+          "P31": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P31",
+                "datatype": "wikibase-entityid",
+                "datavalue": {
+                  "value": {
+                    "entity-type": "item",
+                    "numeric-id": 1440300,
+                    "id": "Q1440300"
+                  },
+                  "type": "wikibase-entityid"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P625": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P625",
+                "datatype": "globecoordinate",
+                "datavalue": {
+                  "value": {
+                    "latitude": 48.85837,
+                    "longitude": 2.294481,
+                    "precision": 0.0001,
+                    "globe": "http://www.wikidata.org/entity/Q2"
+                  },
+                  "type": "globecoordinate"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P571": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P571",
+                "datatype": "time",
+                "datavalue": {
+                  "value": {
+                    "time": "+1887-01-28T00:00:00Z",
+                    "precision": 11,
+                    "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+                  },
+                  "type": "time"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P856": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P856",
+                "datatype": "string",
+                "datavalue": {
+                  "value": "https://www.toureiffel.paris/en",
+                  "type": "string"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P18": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P18",
+                "datatype": "string",
+                "datavalue": {
+                  "value": "Tour Eiffel Wikimedia Commons.jpg",
+                  "type": "string"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P2048": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P2048",
+                "datatype": "quantity",
+                "datavalue": {
+                  "value": {
+                    "amount": "+330",
+                    "unit": "http://www.wikidata.org/entity/Q11573"
+                  },
+                  "type": "quantity"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ]
+        },
+        "sitelinks": {
+          "enwiki": {
+            "site": "enwiki",
+            "title": "Eiffel Tower"
+          },
+          "frwiki": {
+            "site": "frwiki",
+            "title": "Tour Eiffel"
+          }
+        }
+      }
+    }
+  },
+  "entityMissing": {
+    "entities": {
+      "Q99999999": {
+        "id": "Q99999999",
+        "missing": ""
+      }
+    },
+    "success": 1
+  },
+  "entityBatchPartial": {
+    "entities": {
+      "Q243": {
+        "type": "item",
+        "id": "Q243",
+        "labels": {
+          "en": {
+            "language": "en",
+            "value": "Eiffel Tower"
+          },
+          "fr": {
+            "language": "fr",
+            "value": "tour Eiffel"
+          }
+        },
+        "descriptions": {
+          "en": {
+            "language": "en",
+            "value": "tower in Paris, France"
+          },
+          "fr": {
+            "language": "fr",
+            "value": "tour à Paris, France"
+          }
+        },
+        "aliases": {
+          "en": [
+            {
+              "language": "en",
+              "value": "La Tour Eiffel"
+            }
+          ]
+        },
+        "claims": {
+          "P31": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P31",
+                "datatype": "wikibase-entityid",
+                "datavalue": {
+                  "value": {
+                    "entity-type": "item",
+                    "numeric-id": 1440300,
+                    "id": "Q1440300"
+                  },
+                  "type": "wikibase-entityid"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P625": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P625",
+                "datatype": "globecoordinate",
+                "datavalue": {
+                  "value": {
+                    "latitude": 48.85837,
+                    "longitude": 2.294481,
+                    "precision": 0.0001,
+                    "globe": "http://www.wikidata.org/entity/Q2"
+                  },
+                  "type": "globecoordinate"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P571": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P571",
+                "datatype": "time",
+                "datavalue": {
+                  "value": {
+                    "time": "+1887-01-28T00:00:00Z",
+                    "precision": 11,
+                    "calendarmodel": "http://www.wikidata.org/entity/Q1985727"
+                  },
+                  "type": "time"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P856": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P856",
+                "datatype": "string",
+                "datavalue": {
+                  "value": "https://www.toureiffel.paris/en",
+                  "type": "string"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P18": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P18",
+                "datatype": "string",
+                "datavalue": {
+                  "value": "Tour Eiffel Wikimedia Commons.jpg",
+                  "type": "string"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ],
+          "P2048": [
+            {
+              "mainsnak": {
+                "snaktype": "value",
+                "property": "P2048",
+                "datatype": "quantity",
+                "datavalue": {
+                  "value": {
+                    "amount": "+330",
+                    "unit": "http://www.wikidata.org/entity/Q11573"
+                  },
+                  "type": "quantity"
+                }
+              },
+              "type": "statement",
+              "rank": "normal"
+            }
+          ]
+        },
+        "sitelinks": {
+          "enwiki": {
+            "site": "enwiki",
+            "title": "Eiffel Tower"
+          },
+          "frwiki": {
+            "site": "frwiki",
+            "title": "Tour Eiffel"
+          }
+        }
+      },
+      "Q1000002": {
+        "id": 1000002,
+        "labels": {
+          "en": {
+            "language": "en",
+            "value": "x"
+          }
+        }
+      }
+    },
+    "success": 1
+  },
+  "entityMalformed": {
+    "somethingElse": true
+  },
+  "pagepropsResolved": {
+    "batchcomplete": true,
+    "query": {
+      "pages": [
+        {
+          "pageid": 12,
+          "ns": 0,
+          "title": "Tour Eiffel",
+          "pageprops": {
+            "wikibase_item": "Q243"
+          }
+        }
+      ]
+    }
+  },
+  "pagepropsMissing": {
+    "batchcomplete": true,
+    "query": {
+      "pages": [
+        {
+          "ns": 0,
+          "title": "Nonexistent Article",
+          "missing": true
+        }
+      ]
+    }
+  },
+  "nearby": {
+    "head": {
+      "vars": [
+        "item",
+        "itemLabel",
+        "itemDescription",
+        "coord",
+        "instanceOfLabel"
+      ]
+    },
+    "results": {
+      "bindings": [
+        {
+          "item": {
+            "type": "uri",
+            "value": "http://www.wikidata.org/entity/Q243"
+          },
+          "itemLabel": {
+            "type": "literal",
+            "value": "Eiffel Tower",
+            "xml:lang": "en"
+          },
+          "coord": {
+            "datatype": "http://www.opengis.net/ont/geosparql#wktLiteral",
+            "type": "literal",
+            "value": "Point(2.294481 48.85837)"
+          },
+          "instanceOfLabel": {
+            "type": "literal",
+            "value": "tower",
+            "xml:lang": "en"
+          }
+        },
+        {
+          "item": {
+            "type": "uri",
+            "value": "http://www.wikidata.org/entity/Q1000004"
+          },
+          "itemLabel": {
+            "type": "literal",
+            "value": "Champ de Mars",
+            "xml:lang": "en"
+          },
+          "coord": {
+            "datatype": "http://www.opengis.net/ont/geosparql#wktLiteral",
+            "type": "literal",
+            "value": "Point(2.295481 48.85937)"
+          },
+          "instanceOfLabel": {
+            "type": "literal",
+            "value": "public park",
+            "xml:lang": "en"
+          }
+        },
+        {
+          "item": {
+            "type": "uri",
+            "value": "http://www.wikidata.org/entity/Q1000005"
+          },
+          "itemLabel": {
+            "type": "literal",
+            "value": "Something",
+            "xml:lang": "en"
+          }
+        }
+      ]
+    }
+  },
+  "nearbyEmpty": {
+    "head": {
+      "vars": [
+        "item"
+      ]
+    },
+    "results": {
+      "bindings": []
+    }
+  },
+  "imageinfoLicensedRaster": {
+    "batchcomplete": true,
+    "query": {
+      "pages": [
+        {
+          "pageid": 100,
+          "ns": 6,
+          "title": "File:Tour Eiffel Wikimedia Commons.jpg",
+          "imageinfo": [
+            {
+              "url": "https://upload.wikimedia.org/wikipedia/commons/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg",
+              "descriptionurl": "https://commons.wikimedia.org/wiki/File:Tour_Eiffel_Wikimedia_Commons.jpg",
+              "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg/800px-Tour_Eiffel_Wikimedia_Commons.jpg",
+              "thumbwidth": 800,
+              "thumbheight": 1201,
+              "width": 2832,
+              "height": 4256,
+              "mime": "image/jpeg",
+              "extmetadata": {
+                "Artist": {
+                  "value": "<a href=\"//commons.wikimedia.org/wiki/User:Benh\" title=\"User:Benh\">Benh LIEU SONG</a>",
+                  "source": "commons-desc-page"
+                },
+                "LicenseShortName": {
+                  "value": "CC BY-SA 4.0",
+                  "source": "commons-desc-page"
+                },
+                "License": {
+                  "value": "cc-by-sa-4.0",
+                  "source": "commons-desc-page"
+                },
+                "LicenseUrl": {
+                  "value": "https://creativecommons.org/licenses/by-sa/4.0",
+                  "source": "commons-desc-page"
+                },
+                "AttributionRequired": {
+                  "value": "true",
+                  "source": "commons-desc-page"
+                },
+                "ObjectName": {
+                  "value": "Tour Eiffel Wikimedia Commons",
+                  "source": "commons-desc-page"
+                },
+                "ImageDescription": {
+                  "value": "The Eiffel Tower seen from the Champ de Mars.",
+                  "source": "commons-desc-page"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "imageinfoMissingLicence": {
+    "batchcomplete": true,
+    "query": {
+      "pages": [
+        {
+          "pageid": 101,
+          "ns": 6,
+          "title": "File:Tour Eiffel Wikimedia Commons.jpg",
+          "imageinfo": [
+            {
+              "url": "https://upload.wikimedia.org/wikipedia/commons/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg",
+              "descriptionurl": "https://commons.wikimedia.org/wiki/File:Tour_Eiffel_Wikimedia_Commons.jpg",
+              "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg/800px-Tour_Eiffel_Wikimedia_Commons.jpg",
+              "thumbwidth": 800,
+              "thumbheight": 1201,
+              "mime": "image/jpeg",
+              "extmetadata": {
+                "Artist": {
+                  "value": "Somebody",
+                  "source": "commons-desc-page"
+                },
+                "ObjectName": {
+                  "value": "Tour Eiffel Wikimedia Commons",
+                  "source": "commons-desc-page"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "imageinfoSvg": {
+    "batchcomplete": true,
+    "query": {
+      "pages": [
+        {
+          "pageid": 102,
+          "ns": 6,
+          "title": "File:Tour Eiffel diagram.svg",
+          "imageinfo": [
+            {
+              "url": "https://upload.wikimedia.org/wikipedia/commons/1/12/Tour_Eiffel_diagram.svg",
+              "descriptionurl": "https://commons.wikimedia.org/wiki/File:Tour_Eiffel_diagram.svg",
+              "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/12/Tour_Eiffel_diagram.svg/800px-Tour_Eiffel_diagram.svg.png",
+              "thumbwidth": 800,
+              "thumbheight": 1200,
+              "mime": "image/svg+xml",
+              "extmetadata": {
+                "LicenseShortName": {
+                  "value": "CC0",
+                  "source": "commons-desc-page"
+                },
+                "ObjectName": {
+                  "value": "Tour Eiffel diagram",
+                  "source": "commons-desc-page"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "imageinfoUnsafeHost": {
+    "batchcomplete": true,
+    "query": {
+      "pages": [
+        {
+          "pageid": 103,
+          "ns": 6,
+          "title": "File:Tour Eiffel Wikimedia Commons.jpg",
+          "imageinfo": [
+            {
+              "descriptionurl": "https://commons.wikimedia.org/wiki/File:Tour_Eiffel_Wikimedia_Commons.jpg",
+              "thumburl": "https://upload.wikimedia.org.evil.example/800px-Tour_Eiffel.jpg",
+              "thumbwidth": 800,
+              "thumbheight": 1201,
+              "mime": "image/jpeg",
+              "extmetadata": {
+                "LicenseShortName": {
+                  "value": "CC0",
+                  "source": "commons-desc-page"
+                },
+                "ObjectName": {
+                  "value": "Tour Eiffel Wikimedia Commons",
+                  "source": "commons-desc-page"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "imageinfoMissingFile": {
+    "batchcomplete": true,
+    "query": {
+      "pages": [
+        {
+          "ns": 6,
+          "title": "File:Nothing here.jpg",
+          "missing": true
+        }
+      ]
+    }
+  }
+}

@@ -1,4 +1,27 @@
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * This directory, resolved from this file rather than from `process.cwd()`.
+ *
+ * The suite is launched from the project root today, and a fixture that reads a path relative to the cwd is a fixture
+ * that breaks the first time somebody runs it from anywhere else — with an error about a missing JSON file rather than
+ * about the working directory.
+ */
+const FIXTURE_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * A 1x1 JPEG, as bytes.
+ *
+ * Base64 rather than a checked-in binary: a one-pixel image is smaller as a literal than as a file, and a fixture that
+ * reads an asset from disk is one more thing that can be missing.
+ */
+const ONE_PIXEL_JPEG = Buffer.from(
+  "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwcJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPDIzNP/AABEIAAEAAQMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/aAAwDAQACEQMRAD8A9/8A/9k=",
+  "base64",
+);
 
 /**
  * Local stand-ins for every external service, so browser verification can run
@@ -192,7 +215,37 @@ export async function startNominatim() {
  * `omit` drops a category from the answer, which is how the partial-result scenario is
  * produced.
  */
-export async function startOverpass({ omit = [] } = {}) {
+/**
+ * The Wikidata tag that turns one fixture museum into a direct-QID match.
+ *
+ * ## Why it is opt-in
+ *
+ * Adding a tag to the shared element list would change what every other scenario's generation receives. Twelve
+ * scenarios assert against these places, and a fixture change that quietly altered one of them would surface as a
+ * failure with nothing to do with the change. So `startOverpass({ landmark: true })` is the only way to see it.
+ *
+ * ## Why the scheduled museum is the one tagged, and why it is renamed
+ *
+ * Both facts were learned the hard way, and both are worth writing down.
+ *
+ * Tagging *two* museums produced an identity collision: two places cannot hold one Wikidata entity, so the second was
+ * correctly downgraded to `name-and-proximity` — rank 1, untrusted, no facts. Correct behaviour, and a fixture that
+ * exercises it by accident is a fixture that reads as broken. So exactly one place carries the tag, and it is the one
+ * the fixture planner actually schedules: a tagged pool candidate that never reaches the itinerary has no card, and
+ * every card check then fails for a reason unrelated to the code.
+ *
+ * The rename is what lets the *media* path run. `media.ts` checks that a Commons file is plausibly of the place, and
+ * the adapter's fixture file is `File:Tour Eiffel Wikimedia Commons.jpg`. A file title sharing no word with the place
+ * name is refused — correctly — so the subject has to agree with the fixture for the licence and attribution path to
+ * be reachable at all. "Eiffel Tower" also sorts ahead of the other museum, which is what keeps it the scheduled one.
+ *
+ * The result is a Lisbon itinerary containing a stop called "Eiffel Tower". A fixture reading oddly is the price of a
+ * media path that is genuinely covered; the alternative is a second Wikidata entity fixture to keep in step forever.
+ */
+const LANDMARK_TAGGED_ELEMENT_IDS = new Set([2002]);
+const LANDMARK_TAGS = { name: "Eiffel Tower", wikidata: "Q243" };
+
+export async function startOverpass({ omit = [], landmark = false } = {}) {
   /**
    * `exclude` and `rename` are how a *second* search can differ from the first.
    *
@@ -228,11 +281,20 @@ export async function startOverpass({ omit = [] } = {}) {
           Object.entries(element.tags).some((entry) =>
             wanted.has(`${entry[0]}=${entry[1]}`),
           ),
-      ).map((element) =>
-        state.rename.has(element.id)
-          ? { ...element, tags: { ...element.tags, name: state.rename.get(element.id) } }
-          : element,
-      );
+      )
+        .map((element) =>
+          state.rename.has(element.id)
+            ? {
+                ...element,
+                tags: { ...element.tags, name: state.rename.get(element.id) },
+              }
+            : element,
+        )
+        .map((element) =>
+          landmark && LANDMARK_TAGGED_ELEMENT_IDS.has(element.id)
+            ? { ...element, tags: { ...element.tags, ...LANDMARK_TAGS } }
+            : element,
+        );
 
       respondJson(response, { version: 0.6, generator: "fixture", elements });
     });
@@ -276,57 +338,173 @@ export async function startValhalla() {
 }
 
 /**
- * Wikidata, Wikipedia and Wikimedia Commons — all answering "nothing here".
+ * The response bodies, as the five Wikimedia endpoints actually answer.
  *
- * ## Why an empty fixture is the useful one
+ * Generated from `lib/providers/place-intelligence/wikimedia/fixtures.ts` — the adapter's own fixtures — because this
+ * file is plain ESM and cannot import TypeScript. `browser-bodies.test.ts` fails if the two drift, which is what makes
+ * a generated file safe to depend on. Regenerate with:
  *
- * The Overpass fixture's places carry no `wikipedia` or `wikidata` tag, so the only endpoint a lookup reaches for
- * them is the nearby SPARQL fallback. Answering it with an empty result set makes every place `unmatched`, which is
- * both the most common real outcome and the one with the most ways to be reported dishonestly: the panel must say
- * Wikidata's coverage is incomplete without implying anything about the traveller's itinerary.
+ *   `UPDATE_WIKIMEDIA_BODIES=1 npx vitest run lib/providers/place-intelligence/wikimedia/browser-bodies.test.ts`
+ */
+const BODIES = JSON.parse(
+  readFileSync(join(FIXTURE_DIR, "wikimedia-bodies.json"), "utf8"),
+);
+
+/** The entity document for a mode. `entityMalformed` is a body that parses as JSON and fails validation. */
+function entityBodyFor(mode) {
+  if (mode === "malformed") return BODIES.entityMalformed;
+  if (mode === "empty") return BODIES.entityMissing;
+  return BODIES.entityData;
+}
+
+/**
+ * The Commons answer for a mode.
+ *
+ * Four of the five refusals the media policy exists for, each a real Commons response rather than an error: a file
+ * with no licence, an SVG, a thumbnail on a host the allowlist does not name, and a title Commons does not hold.
+ * `accepted` is the only one that may be displayed.
+ */
+function commonsBodyFor(mode, baseUrl) {
+  switch (mode) {
+    case "accepted":
+      return withLocalFilePage(BODIES.imageinfoLicensedRaster, baseUrl);
+    case "media-unlicensed":
+      return BODIES.imageinfoMissingLicence;
+    case "media-svg":
+      return BODIES.imageinfoSvg;
+    case "media-unsafe-host":
+      return BODIES.imageinfoUnsafeHost;
+    default:
+      return BODIES.imageinfoMissingFile;
+  }
+}
+
+/**
+ * The accepted file, with its Commons page moved onto the fixture's own origin.
+ *
+ * `media.ts` requires a file page to be served by the same origin as the configured Commons API — a sound rule, since a
+ * "source" link pointing somewhere other than the API that described the file is not a source. Overriding the API URL
+ * for a fixture therefore invalidates the real `commons.wikimedia.org` page URL in the canned body, and the file is
+ * refused for a reason that has nothing to do with what is under test. This is the whole of that adjustment.
+ *
+ * The image URLs are deliberately **not** rewritten. `url` and `thumburl` stay on `upload.wikimedia.org`, because the
+ * media allowlist names that host and this checkpoint forbids broadening it — so what is stored and rendered is a real
+ * allowlisted URL, and Chrome blocks it rather than the policy being relaxed to make a test pass.
+ */
+function withLocalFilePage(body, baseUrl) {
+  const pages = body.query.pages.map((page) => ({
+    ...page,
+    ...(page.imageinfo
+      ? {
+          imageinfo: page.imageinfo.map((info) => ({
+            ...info,
+            ...(info.descriptionurl
+              ? { descriptionurl: `${baseUrl}/commons/wiki/file-page` }
+              : {}),
+            ...(info.url ? { url: `${baseUrl}/media/original.jpg` } : {}),
+            ...(info.thumburl ? { thumburl: `${baseUrl}/media/thumb.jpg` } : {}),
+          })),
+        }
+      : {}),
+  }));
+
+  return { ...body, query: { ...body.query, pages } };
+}
+
+/**
+ * Wikidata, Wikipedia and Wikimedia Commons.
  *
  * ## Why it must exist at all
  *
  * Without it the *server* would query live Wikidata. Blocking the hosts in Chrome does nothing about that — the route
  * runs in Node — and a verification suite that queried volunteer infrastructure on every commit is one nobody could
- * run. `state.requests` is counted so a scenario can prove the fixture, rather than the internet, was consulted.
+ * run. `state.requests` and the per-endpoint counters let a scenario prove the fixture, rather than the internet, was
+ * consulted, and that a second call asked about fewer places than the first.
  *
- * The shapes mirror `lib/providers/place-intelligence/wikimedia/fixtures.ts`: an empty SPARQL binding list, a
- * MediaWiki query with no pages, and an entity document with no entities.
+ * ## The modes
+ *
+ *  - `empty` — nothing found anywhere. The commonest real outcome, and the one whose copy has the most ways to be
+ *    dishonest, so it is the default
+ *  - `accepted` — a direct-QID entity with a description, a date, a designation and one displayable licensed raster
+ *  - `media-unlicensed`, `media-svg`, `media-unsafe-host` — the entity is accepted and the *file* is refused, which
+ *    must leave the description and the facts intact
+ *  - `malformed` — a body that is valid JSON and invalid against the schema. Nothing is stored and nothing is claimed
+ *
+ * `delayMs` holds every answer back. A fixture that replies in two milliseconds makes an in-flight lookup
+ * unobservable, so cancellation could not be verified at all — the behaviour under test only exists while a request
+ * is outstanding.
  */
-export async function startWikimedia() {
-  const state = { requests: 0, paths: [] };
+export async function startWikimedia({ mode = "empty", delayMs = 0 } = {}) {
+  const state = { requests: 0, paths: [], entity: 0, commons: 0, sparql: 0 };
 
-  const server = createServer((request, response) => {
+  /*
+   * Assigned after `listen`, and read only inside a handler — which cannot run before then. The file-page rewrite needs
+   * this server's own origin, and the port does not exist until the socket is bound.
+   */
+  let origin = "";
+
+  const server = createServer((rawRequest, rawResponse) => {
     state.requests += 1;
-    state.paths.push(request.url ?? "");
+    state.paths.push(rawRequest.url ?? "");
+
+    const response = delayMs > 0 ? deferred(rawResponse, delayMs) : rawResponse;
 
     /* Bodies are drained even though nothing reads them: an unread POST body stalls the socket. */
-    request.on("data", () => {});
-    request.on("end", () => {
-      const path = request.url ?? "";
+    rawRequest.on("data", () => {});
+    rawRequest.on("end", () => {
+      const path = rawRequest.url ?? "";
 
       if (path.includes("/sparql")) {
-        /* `NEARBY_EMPTY_RESPONSE`: a real answer, and the one most of the world produces. */
-        respondJson(response, {
-          head: { vars: ["item"] },
-          results: { bindings: [] },
+        state.sparql += 1;
+        /*
+         * The nearby fallback. Empty in every mode: its matches are rank 1 and are never displayed, so a scenario
+         * that wanted a *displayed* landmark would be testing the wrong rung of the ladder.
+         */
+        respondJson(response, BODIES.nearbyEmpty);
+        return;
+      }
+
+      if (path.includes("EntityData") || path.includes("wbgetentities")) {
+        state.entity += 1;
+        respondJson(response, entityBodyFor(mode));
+        return;
+      }
+
+      if (path.includes("/commons/")) {
+        state.commons += 1;
+        respondJson(response, commonsBodyFor(mode, origin));
+        return;
+      }
+
+      if (path.startsWith("/media/")) {
+        /*
+         * Real bytes, so "one image renders" is a claim about a decoded image rather than about an element. `broken`
+         * answers 404 for the image-failure path — a genuine load failure rather than a synthetic error event.
+         */
+        if (path.includes("broken")) {
+          rawResponse.writeHead(404, { "content-type": "text/plain" });
+          rawResponse.end("not found");
+          return;
+        }
+        rawResponse.writeHead(200, {
+          "content-type": "image/jpeg",
+          "cache-control": "no-store",
         });
+        rawResponse.end(ONE_PIXEL_JPEG);
         return;
       }
 
-      if (path.includes("EntityData")) {
-        respondJson(response, { entities: {} });
-        return;
-      }
-
-      /* Every MediaWiki `api.php` — Wikidata's, Commons', and any language's Wikipedia. */
-      respondJson(response, { batchcomplete: true, query: { pages: [] } });
+      /* A language Wikipedia's `api.php`, for the title path. */
+      respondJson(
+        response,
+        mode === "empty" ? BODIES.pagepropsMissing : BODIES.pagepropsResolved,
+      );
     });
   });
 
   const port = await listen(server);
   const baseUrl = `http://127.0.0.1:${port}`;
+  origin = baseUrl;
 
   return {
     server,
@@ -344,6 +522,17 @@ export async function startWikimedia() {
       ROAMLY_WIKIDATA_ENTITY_BASE_URL: `${baseUrl}/wiki/Special:EntityData`,
       ROAMLY_COMMONS_API_URL: `${baseUrl}/commons/w/api.php`,
       ROAMLY_WIKIPEDIA_API_URL_TEMPLATE: `${baseUrl}/{lang}/w/api.php`,
+    },
+    /**
+     * The build-time pair that lets a stored fixture URL survive validation in the browser.
+     *
+     * Separate from `env` because these are compiled into the client bundle rather than read at request time, so they
+     * must be present before Next starts — and because a scenario that wants provider isolation without the URL
+     * allowance should be able to have exactly that.
+     */
+    publicEnv: {
+      NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_MODE: "1",
+      NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN: baseUrl,
     },
   };
 }

@@ -1,3 +1,4 @@
+import { isFixtureLoopbackUrl } from "./fixture-origin";
 import type { IsoTimestamp, LicenceId, Permission, ProviderId } from "./types";
 
 /**
@@ -51,13 +52,30 @@ export const MAX_URL_LENGTH = 2048;
  */
 const SAFE_URL_SCHEMES: ReadonlySet<string> = new Set(["https:"]);
 
+/**
+ * Whether a URL may be stored, linked to, or rendered as an image source.
+ *
+ * The bound and the scheme, in that order, and one deliberate exception.
+ *
+ * ## The exception
+ *
+ * A browser-verification fixture cannot serve HTTPS without a local certificate authority, so a *displayed* Commons
+ * photograph — its licence, its creator, its file page, on a real card — was unverifiable end to end. The allowance is
+ * `isFixtureLoopbackUrl`, and every condition it requires lives in that one module: a test process, an explicit opt-in,
+ * a configured origin, an exact loopback hostname and an exact port.
+ *
+ * It is checked *after* the length bound and *only* when the scheme check has already failed, so the ordinary path is
+ * unchanged and a production process never evaluates it at all. Nothing else in the codebase reads those environment
+ * values, which is what keeps this a single decision rather than a policy assembled from four scattered flags.
+ */
 export function urlIsSafe(value: string): boolean {
   if (value.length === 0 || value.length > MAX_URL_LENGTH) return false;
   try {
-    return SAFE_URL_SCHEMES.has(new URL(value).protocol);
+    if (SAFE_URL_SCHEMES.has(new URL(value).protocol)) return true;
   } catch {
     return false;
   }
+  return isFixtureLoopbackUrl(value);
 }
 
 /**

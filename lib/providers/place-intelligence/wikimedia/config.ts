@@ -1,3 +1,4 @@
+import { isFixtureLoopbackUrl } from "@/lib/place-intelligence/fixture-origin";
 import "server-only";
 
 /**
@@ -69,14 +70,22 @@ const ALLOWED_MEDIA_HOSTS: ReadonlySet<string> = new Set([
     : []),
 ]);
 
+/**
+ * Whether a media URL points at a host Roamly may load an image from.
+ *
+ * HTTPS and an exact host match, plus the same single fixture exception `urlIsSafe` makes — routed through the same
+ * module, so there is one set of conditions rather than two that could drift. Without it this gate would refuse the
+ * fixture thumbnail after the storage gate had accepted it, and the browser suite would prove nothing about a
+ * displayed photograph while appearing to.
+ */
 export function mediaHostIsAllowed(url: string): boolean {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== "https:") return false;
-    return ALLOWED_MEDIA_HOSTS.has(parsed.host);
+    if (parsed.protocol === "https:") return ALLOWED_MEDIA_HOSTS.has(parsed.host);
   } catch {
     return false;
   }
+  return isFixtureLoopbackUrl(url);
 }
 
 /**
