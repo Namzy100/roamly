@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
@@ -13,15 +14,83 @@ import { fileURLToPath } from "node:url";
 const FIXTURE_DIR = dirname(fileURLToPath(import.meta.url));
 
 /**
- * A 1x1 JPEG, as bytes.
+ * A 2x2 baseline JPEG, as bytes.
  *
- * Base64 rather than a checked-in binary: a one-pixel image is smaller as a literal than as a file, and a fixture that
- * reads an asset from disk is one more thing that can be missing.
+ * Base64 rather than a checked-in binary: the image is smaller as a literal than as a file, and a fixture that reads an
+ * asset from disk is one more thing that can be missing.
+ *
+ * ## Why this is not the 1x1 it used to be
+ *
+ * The previous literal was a widely copied "smallest JPEG" whose DQT segment declared length 67 — two length bytes, one
+ * Pq/Tq byte and 64 coefficients — but carried only 63 coefficients. A decoder that trusts the declared length reads the
+ * following `0xFF` as the missing 64th coefficient, so the marker chain desynchronises one byte early and the SOF0 that
+ * holds the dimensions is never reached. Chrome answered 200, fired `error`, and reported `naturalWidth === 0`; nothing
+ * in the network layer was wrong, which is what made it expensive to find. `sips` agreed: format `jpeg`, dimensions nil.
+ *
+ * This replacement came out of a real encoder with its APP1/APP13 metadata stripped, so every segment length matches its
+ * payload and the chain walks cleanly from SOI to EOI. Two pixels rather than one because a 1x1 image has no interior,
+ * so it cannot catch a decoder that mishandles an incomplete MCU.
  */
-const ONE_PIXEL_JPEG = Buffer.from(
-  "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwcJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPDIzNP/AABEIAAEAAQMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/aAAwDAQACEQMRAD8A9/8A/9k=",
+const MEDIA_JPEG = Buffer.from(
+  "/9j/4AAQSkZJRgABAQAASABIAAD/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9sAQwAEBAQEBAQGBAQGCQYGBgkMCQkJCQwPDAwMDAwPEg8PDw8PDxISEhISEhISFRUVFRUVGRkZGRkcHBwcHBwcHBwc/9sAQwEEBQUHBwcMBwcMHRQQFB0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0dHR0d/90ABAAB/9oADAMBAAIRAxEAPwDrtM/5Btp/1xj/APQRV6qOmf8AINtP+uMf/oIq9WwH/9k=",
   "base64",
 );
+
+/** The exact bytes above. Not a guess — measured from the encoder's output. */
+const MEDIA_JPEG_SHA256 =
+  "7427f1876c4865c4bed0cd731f7c221a235650532e9d56a6557c6c7813cea3bc";
+
+/**
+ * The image is a decodable JPEG, checked before any scenario can depend on it.
+ *
+ * A structurally broken image does not fail here, in the fixture — it fails in the browser as "the card shows no
+ * photograph", one whole pipeline away from the cause, with a clean 200 in the network panel. This turns that into an
+ * import-time error naming the bytes. A magic-byte check would not have caught the old literal: it began `FFD8FFE0` and
+ * ended `FFD9`, and was undecodable in between.
+ */
+{
+  const digest = createHash("sha256").update(MEDIA_JPEG).digest("hex");
+  if (digest !== MEDIA_JPEG_SHA256) {
+    throw new Error(
+      `the fixture JPEG has changed: expected ${MEDIA_JPEG_SHA256}, got ${digest}`,
+    );
+  }
+
+  if (MEDIA_JPEG.readUInt16BE(0) !== 0xffd8) {
+    throw new Error("the fixture JPEG does not begin with SOI");
+  }
+
+  /* Every segment length agrees with its payload, from SOI to SOS — the property the old literal violated. */
+  let cursor = 2;
+  let dimensions = null;
+  while (cursor < MEDIA_JPEG.length - 1) {
+    if (MEDIA_JPEG[cursor] !== 0xff) {
+      throw new Error(
+        `the fixture JPEG's marker chain desynchronises at byte ${cursor}`,
+      );
+    }
+    const marker = MEDIA_JPEG[cursor + 1];
+    if (marker === 0xd9) break;
+    /* SOF0 and SOF2 carry the dimensions a decoder needs; a chain that never reaches one decodes to 0x0. */
+    if (marker === 0xc0 || marker === 0xc2) {
+      dimensions = {
+        height: MEDIA_JPEG.readUInt16BE(cursor + 5),
+        width: MEDIA_JPEG.readUInt16BE(cursor + 7),
+      };
+    }
+    /* Entropy-coded data follows SOS and is not length-prefixed, so the walk stops there. */
+    if (marker === 0xda) break;
+    cursor += 2 + MEDIA_JPEG.readUInt16BE(cursor + 2);
+  }
+  if (dimensions === null) {
+    throw new Error("the fixture JPEG has no reachable frame header");
+  }
+  if (dimensions.width < 1 || dimensions.height < 1) {
+    throw new Error(
+      `the fixture JPEG declares ${dimensions.width}x${dimensions.height}`,
+    );
+  }
+}
 
 /**
  * Local stand-ins for every external service, so browser verification can run
@@ -361,13 +430,22 @@ function entityBodyFor(mode) {
  * The Commons answer for a mode.
  *
  * Four of the five refusals the media policy exists for, each a real Commons response rather than an error: a file
- * with no licence, an SVG, a thumbnail on a host the allowlist does not name, and a title Commons does not hold.
- * `accepted` is the only one that may be displayed.
+ * with no licence, an SVG, a thumbnail on a host the allowlist does not name, and a title Commons does not hold. Those
+ * four are how an *absent* media area is tested — a record the policy declined to display — and they are the only
+ * honest way to test it. A malformed image served as `image/jpeg` would produce the same empty card for a completely
+ * different reason and is never used for that purpose.
+ *
+ * `accepted` and `media-broken` are the two that may be displayed. They differ only in which thumbnail route the stored
+ * URL names: `accepted` points at a valid JPEG and must render, `media-broken` points at a 404 and must degrade.
  */
 function commonsBodyFor(mode, baseUrl) {
   switch (mode) {
     case "accepted":
       return withLocalFilePage(BODIES.imageinfoLicensedRaster, baseUrl);
+    case "media-broken":
+      return withLocalFilePage(BODIES.imageinfoLicensedRaster, baseUrl, {
+        thumbnail: "broken.jpg",
+      });
     case "media-unlicensed":
       return BODIES.imageinfoMissingLicence;
     case "media-svg":
@@ -380,18 +458,35 @@ function commonsBodyFor(mode, baseUrl) {
 }
 
 /**
- * The accepted file, with its Commons page moved onto the fixture's own origin.
+ * The accepted file, with every Commons URL moved onto the fixture's own loopback origin.
+ *
+ * ## The file page
  *
  * `media.ts` requires a file page to be served by the same origin as the configured Commons API — a sound rule, since a
  * "source" link pointing somewhere other than the API that described the file is not a source. Overriding the API URL
  * for a fixture therefore invalidates the real `commons.wikimedia.org` page URL in the canned body, and the file is
- * refused for a reason that has nothing to do with what is under test. This is the whole of that adjustment.
+ * refused for a reason that has nothing to do with what is under test.
  *
- * The image URLs are deliberately **not** rewritten. `url` and `thumburl` stay on `upload.wikimedia.org`, because the
- * media allowlist names that host and this checkpoint forbids broadening it — so what is stored and rendered is a real
- * allowlisted URL, and Chrome blocks it rather than the policy being relaxed to make a test pass.
+ * ## The image URLs, and why rewriting them is the honest choice
+ *
+ * `url` and `thumburl` are rewritten too, onto `/media/…` on this server. Leaving them on `upload.wikimedia.org` was
+ * tried and abandoned: Chrome blocks that host for the whole run, so a record could be perfectly displayable and the
+ * image could still never load — which left the suite unable to tell "the display policy refused this file" apart from
+ * "the network refused it", and every media assertion written around a photograph expected to fail.
+ *
+ * The media allowlist is **not** broadened to achieve this. `isFixtureLoopbackUrl` in
+ * `lib/place-intelligence/fixture-origin.ts` admits these URLs under the isolated browser-fixture policy alone, which
+ * additionally requires the page's own hostname to be loopback — a condition no deployment can satisfy however its
+ * environment is configured.
+ *
+ * ## `thumbnail` picks which route the record points at
+ *
+ * `thumb.jpg` serves a valid, decodable JPEG and is what the accepted path expects to render. `broken.jpg` answers 404,
+ * which is how the image-failure path is driven. The *metadata* is identical either way — same licence, same credit,
+ * same MIME, same declared dimensions — so the record is display-eligible in both, and the browser genuinely mounts the
+ * image and attempts the request. That is the point: the failure under test is a dead URL, not a refused record.
  */
-function withLocalFilePage(body, baseUrl) {
+function withLocalFilePage(body, baseUrl, { thumbnail = "thumb.jpg" } = {}) {
   const pages = body.query.pages.map((page) => ({
     ...page,
     ...(page.imageinfo
@@ -402,7 +497,9 @@ function withLocalFilePage(body, baseUrl) {
               ? { descriptionurl: `${baseUrl}/commons/wiki/file-page` }
               : {}),
             ...(info.url ? { url: `${baseUrl}/media/original.jpg` } : {}),
-            ...(info.thumburl ? { thumburl: `${baseUrl}/media/thumb.jpg` } : {}),
+            ...(info.thumburl
+              ? { thumburl: `${baseUrl}/media/${thumbnail}` }
+              : {}),
           })),
         }
       : {}),
@@ -425,9 +522,13 @@ function withLocalFilePage(body, baseUrl) {
  *
  *  - `empty` — nothing found anywhere. The commonest real outcome, and the one whose copy has the most ways to be
  *    dishonest, so it is the default
- *  - `accepted` — a direct-QID entity with a description, a date, a designation and one displayable licensed raster
- *  - `media-unlicensed`, `media-svg`, `media-unsafe-host` — the entity is accepted and the *file* is refused, which
- *    must leave the description and the facts intact
+ *  - `accepted` — a direct-QID entity with a description, a date, a designation and one displayable licensed raster,
+ *    whose thumbnail is a valid JPEG this server serves and which the card is expected to decode and render
+ *  - `media-broken` — the same accepted, display-eligible record with its thumbnail pointing at a route that answers
+ *    404. The image mounts, the request is made, and it fails: the degradation path, driven by a dead URL rather than
+ *    by corrupt bytes
+ *  - `media-unlicensed`, `media-svg`, `media-unsafe-host` — the entity is accepted and the *file* is refused by policy,
+ *    which must leave the description and the facts intact. These are how an absent media area is tested
  *  - `malformed` — a body that is valid JSON and invalid against the schema. Nothing is stored and nothing is claimed
  *
  * `delayMs` holds every answer back. A fixture that replies in two milliseconds makes an in-flight lookup
@@ -482,19 +583,31 @@ export async function startWikimedia({
 
       if (path.startsWith("/media/")) {
         /*
-         * Real bytes, so "one image renders" is a claim about a decoded image rather than about an element. `broken`
-         * answers 404 for the image-failure path — a genuine load failure rather than a synthetic error event.
+         * Real bytes, so "one image renders" is a claim about a *decoded* image rather than about an element.
+         *
+         * `broken` answers 404, which is what the image-failure path uses: a genuine load failure delivered by the
+         * transport, not a synthetic `error` event and not malformed bytes wearing an `image/jpeg` header. The
+         * distinction matters — a 404 tests how the component degrades after a failed load, whereas corrupt bytes test
+         * Chrome's JPEG parser, which is not Roamly's to verify.
          */
         if (path.includes("broken")) {
           rawResponse.writeHead(404, { "content-type": "text/plain" });
           rawResponse.end("not found");
           return;
         }
+        /*
+         * An explicit `content-length`, so the body is a single sized response rather than a chunked one.
+         *
+         * Node infers `transfer-encoding: chunked` when the length is unstated, which is legal and which Chrome handled
+         * without complaint — but it costs the one header that would have shown a truncated body for what it was, and
+         * `encodedDataLength` then reports framing overhead rather than the payload.
+         */
         rawResponse.writeHead(200, {
           "content-type": "image/jpeg",
+          "content-length": String(MEDIA_JPEG.length),
           "cache-control": "no-store",
         });
-        rawResponse.end(ONE_PIXEL_JPEG);
+        rawResponse.end(MEDIA_JPEG);
         return;
       }
 

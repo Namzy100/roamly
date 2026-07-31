@@ -11,6 +11,7 @@ import {
   PROVIDER_DISPLAY_NAMES,
   describeLandmarkContext,
   externalHref,
+  landmarkContextWithoutPhoto,
 } from "./landmark-context";
 
 /**
@@ -449,5 +450,58 @@ describe("what a card never shows", () => {
 
     /* The description is the stored sentence and nothing else — no lead-in, no flourish. */
     expect(view?.description?.text).toBe("tile museum in Lisbon, Portugal");
+  });
+});
+
+/**
+ * A photograph that failed to load in the browser, and the credit that has to leave with it.
+ *
+ * The server cannot know this happened — the record it stored was displayable, and the URL only turned out to be dead
+ * once a browser asked. So the removal is the component's job, and this is the transform it applies.
+ */
+describe("a view whose photograph failed to load", () => {
+  it("becomes the view a refused photograph would have produced", () => {
+    const failed = landmarkContextWithoutPhoto(describeLandmarkContext(card())!);
+
+    /*
+     * `attributions: []` as well as `photo: null`, because that is what the derivation itself produces for a refused
+     * file: `deriveLandmarkCardIntelligence` computes the credit lines over the items that actually display, so a
+     * photograph that was never shown contributes none. Comparing against `card({ photo: null })` alone would compare
+     * against a shape the real pipeline cannot emit.
+     */
+    const refused = describeLandmarkContext(
+      card({ photo: null, attributions: [] }),
+    )!;
+
+    /* Not merely similar. The two states are the same state, so they must be the same value. */
+    expect(failed).toEqual(refused);
+  });
+
+  it("stops naming Wikimedia Commons and stops printing the licence", () => {
+    const view = landmarkContextWithoutPhoto(describeLandmarkContext(card())!);
+
+    expect(view.photo).toBeNull();
+    expect(view.sourceLine).toBe("Wikidata");
+    expect(view.sources).toEqual(["Wikidata"]);
+    expect(view.sourceLine).not.toContain("CC-BY-SA-3.0");
+    expect(view.disclosure).toEqual([]);
+  });
+
+  /** The description and the facts are Wikidata's and are still on screen, so Wikidata stays credited. */
+  it("keeps everything the remaining content obliges", () => {
+    const original = describeLandmarkContext(card())!;
+    const view = landmarkContextWithoutPhoto(original);
+
+    expect(view.label).toBe(LANDMARK_CONTEXT_LABEL);
+    expect(view.description).toEqual(original.description);
+    expect(view.facts).toEqual(original.facts);
+    expect(view.sources).toContain(PROVIDER_DISPLAY_NAMES.wikidata);
+  });
+
+  /** Applied unconditionally by the caller, so a view with no photograph must pass straight through. */
+  it("is a no-op when there was no photograph", () => {
+    const refused = describeLandmarkContext(card({ photo: null }))!;
+
+    expect(landmarkContextWithoutPhoto(refused)).toBe(refused);
   });
 });

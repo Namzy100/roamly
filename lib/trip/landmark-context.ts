@@ -155,6 +155,54 @@ export function describeLandmarkContext(
 }
 
 /**
+ * The same view with its photograph, and every credit that photograph obliged, removed.
+ *
+ * ## Why a browser-side failure has to reach the attribution
+ *
+ * `describeLandmarkContext` composes the source line and the credit rows from the *stored* record, which is the only
+ * thing the server knows. But whether the file actually reached the traveller is decided in their browser, and a dead
+ * URL — a deleted file, a network that dropped it — is discovered there and nowhere else.
+ *
+ * Without this, a card whose photograph failed to load went on naming Wikimedia Commons and printing a licence for an
+ * image that was not on screen. That is the exact failure this module already refuses to commit in the other direction:
+ * "naming Wikimedia Commons on a card whose photograph was refused claims a use that did not happen." A use that
+ * *failed* did not happen either, and the credit has to travel with the image.
+ *
+ * ## What survives, and why Commons can be dropped by name
+ *
+ * The description and the facts are Wikidata's and are still on screen, so Wikidata stays named — under-crediting is as
+ * wrong as over-crediting. Commons is removed outright, which is sound because `deriveLandmarkCardIntelligence` only
+ * ever reaches Commons for a *file*: descriptions come from Wikidata or a language Wikipedia, and facts from Wikidata.
+ * So the only thing that can have put Commons in this list is the photograph being removed here.
+ *
+ * The result is the view a card would have got had the display policy refused the file to begin with, which is the
+ * point — the two states read identically to a traveller because they are the same state.
+ */
+export function landmarkContextWithoutPhoto(
+  view: LandmarkContextView,
+): LandmarkContextView {
+  /* Nothing to remove. Returned unchanged so a caller can apply this unconditionally. */
+  if (!view.photo) return view;
+
+  const sources = view.sources.filter(
+    (name) => name !== PROVIDER_DISPLAY_NAMES["wikimedia-commons"],
+  );
+
+  return {
+    ...view,
+    sources,
+    /* Rebuilt from the survivors, so the photograph's licence leaves with it rather than being spliced out. */
+    sourceLine: sources.join(" · "),
+    /* Every row was `disclosureFor(photo)`. With no photograph there is nothing they could credit. */
+    disclosure: [],
+    attributions: view.attributions.filter(
+      (line) => line !== view.photo?.credit,
+    ),
+    photo: null,
+  };
+}
+
+/**
  * The credit rows for one photograph.
  *
  * Ordered as a credit is read: who made it, under what terms, where to check. Every row is conditional on its own

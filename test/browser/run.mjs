@@ -4303,6 +4303,35 @@ async function scenarioLandmarkContext(chrome, fixtures) {
  * photograph: its lazy loading, its exact licence line, its creator and file-page links, and the load-failure path.
  * Those are asserted in `lib/trip/landmark-context.test.ts` at the composition level and nowhere in a browser.
  */
+/**
+ * What the accepted Commons fixture normalizes to, spelled out rather than pattern-matched.
+ *
+ * Every value here is the adapter's output for `imageinfoLicensedRaster`, not a guess: `LicenseShortName` is the free
+ * text `"CC BY-SA 4.0"`, which `COMMONS_LICENCES` maps onto the identifier `CC-BY-SA-4.0`, and `Artist` is HTML that
+ * `normalizeFileMetadata` strips to a bare name. `smoke.test.ts` pins both.
+ *
+ * The licence is asserted **verbatim**. `CC-BY-SA-3.0` and `CC-BY-SA-4.0` are different documents with different terms,
+ * so a check that accepted "Creative Commons" would pass against a card that had lost the version — which is the only
+ * part of the string telling a reuser what they may do. `LANDMARK_LICENCE_IS_VERBATIM` exists to be asserted against,
+ * and this is the assertion.
+ */
+const FIXTURE_MEDIA = {
+  licence: "CC-BY-SA-4.0",
+  creator: "Benh LIEU SONG",
+  /* The exact line the file asks to be credited with, composed by `composeAttribution`. */
+  credit: "Benh LIEU SONG (CC BY-SA 4.0), via Wikimedia Commons",
+  licenceUrl: "https://creativecommons.org/licenses/by-sa/4.0",
+  altText: "Tour Eiffel Wikimedia Commons",
+  /**
+   * The decoded size of the JPEG the fixture server serves — not the 800x1201 the Commons body *declares*.
+   *
+   * Both numbers are real and they are not the same thing: the metadata describes the file Commons would serve, and
+   * these are the pixels this harness actually delivers. Asserting the decoded pair is what proves a decode happened.
+   */
+  decodedWidth: 2,
+  decodedHeight: 2,
+};
+
 async function scenarioEnrichedLandmark(chrome, fixtures) {
   currentScenario = "Landmark context on a card";
   console.log(`\n▸ ${currentScenario}`);
@@ -4361,6 +4390,24 @@ async function scenarioEnrichedLandmark(chrome, fixtures) {
     });
 
     await page.goto(`${server.baseUrl}/`);
+
+    /*
+     * The enrich counter, installed before the trip exists so it covers the workspace's whole lifetime.
+     *
+     * Needed twice below: rendering a photograph and opening a disclosure must each cost zero requests, and a counter
+     * patched in after the card mounted would leave exactly the window those claims are about uncovered.
+     */
+    await page.evaluate(`
+      window.__enrichCalls = 0;
+      const original = window.fetch;
+      window.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : (input?.url ?? "");
+        if (url.includes("/api/place-intelligence/enrich")) window.__enrichCalls += 1;
+        return original(input, init);
+      };
+      return true;
+    `);
+
     await submitForm(page);
     await chooseFirstDestination(page);
     await page.click('[data-testid="generate-with-ai"]');
@@ -4423,6 +4470,17 @@ async function scenarioEnrichedLandmark(chrome, fixtures) {
     const apiCallsAfterRun =
       wikimedia.state.entity + wikimedia.state.commons + wikimedia.state.sparql;
 
+    /**
+     * The same baseline from the browser's side.
+     *
+     * The fixture counters above see provider traffic; this sees requests the *page* made to Roamly's own enrich route.
+     * Both are needed, because a client that re-asked Roamly for context it had already stored would be a bug the
+     * provider counters could not detect — the route would answer from the sidecar and never reach Wikimedia.
+     */
+    const enrichCallsAfterRun = await page.evaluate(
+      `return window.__enrichCalls;`,
+    );
+
     /* -- the card ----------------------------------------------------------- */
 
     await expect(
@@ -4459,20 +4517,183 @@ async function scenarioEnrichedLandmark(chrome, fixtures) {
       `),
     );
 
+    /* -- the photograph, decoded and rendered -------------------------------- */
+
     /**
-     * The source line names what actually rendered, and nothing else.
+     * A *decoded* image, not an element carrying a `src`.
      *
-     * With no displayable file, "Wikimedia Commons" must be absent: naming it would claim a use that did not happen.
-     * The exact-licence assertion belongs to the accepted-media path, which this suite does not yet reach — see the
-     * note at the top of this scenario.
+     * `naturalWidth` is the only property that separates the two, and it is precisely what a 200 response does not
+     * guarantee. The fixture this suite used until recently answered 200 with `content-type: image/jpeg` and decoded to
+     * nothing, because its quantisation table declared 64 coefficients and carried 63 — so the marker chain
+     * desynchronised before the frame header and Chrome reported `naturalWidth === 0` with no network error at all.
+     *
+     * The exact decoded dimensions are asserted rather than "nonzero" because "nonzero" would also pass for some other
+     * image arriving on that URL, and the whole value of a fixture is that its bytes are known.
      */
-    await expect("the source line names only the projects that rendered", () =>
+    await expect("the card renders exactly one decoded photograph", async () => {
+      /* `loading="lazy"`, so the file is fetched when the region comes into view. This makes that deterministic. */
+      await page.evaluate(`
+        document.querySelector('[data-testid="landmark-context"]').scrollIntoView({ block: "center" });
+        return true;
+      `);
+      await page.waitFor(
+        `(() => {
+           const img = document.querySelector('[data-testid="landmark-photo"]');
+           return img !== null && img.complete && img.naturalWidth > 0;
+         })()`,
+        { timeoutMs: 20_000, label: "the thumbnail to decode" },
+      );
+
+      return page.evaluate(`
+        const region = document.querySelector('[data-testid="landmark-context"]');
+        if (region.dataset.hasImage !== "true") return "the region does not claim an image";
+
+        const images = region.querySelectorAll('[data-testid="landmark-photo"]');
+        if (images.length !== 1) return images.length + " photograph(s) in one region";
+
+        const img = images[0];
+        if (!img.isConnected) return "the image is not mounted";
+        if (img.complete !== true) return "img.complete is false";
+        if (img.naturalWidth !== ${FIXTURE_MEDIA.decodedWidth}) {
+          return "naturalWidth is " + img.naturalWidth;
+        }
+        if (img.naturalHeight !== ${FIXTURE_MEDIA.decodedHeight}) {
+          return "naturalHeight is " + img.naturalHeight;
+        }
+        return true;
+      `);
+    });
+
+    /**
+     * Rendering a photograph is a browser fetch and nothing else.
+     *
+     * The `<img>` is deliberately plain — no `next/image`, no loader, no proxy route — so loading it must not touch
+     * Roamly's own API. A component that had reached for the enrich route to resolve a URL would show up here.
+     */
+    await expect("rendering the photograph sent no enrichment request", async () => {
+      const calls = await page.evaluate(`return window.__enrichCalls;`);
+      return calls === enrichCallsAfterRun
+        ? true
+        : `${calls} enrich request(s), was ${enrichCallsAfterRun}`;
+    });
+
+    /**
+     * The image is fetched from the fixture's own loopback origin, and says so.
+     *
+     * `currentSrc` rather than `src`: it is the URL the browser actually resolved and loaded, so a component that
+     * rewrote or proxied the stored URL would show up here and nowhere else.
+     */
+    await expect("the loaded URL is the exact loopback fixture URL", () =>
+      page.evaluate(`
+        const img = document.querySelector('[data-testid="landmark-photo"]');
+        if (img.currentSrc !== img.src) return "currentSrc and src disagree";
+        const url = new URL(img.currentSrc);
+        if (url.origin !== ${JSON.stringify(wikimedia.baseUrl)}) {
+          return "origin is " + url.origin;
+        }
+        return url.pathname === "/media/thumb.jpg" ? true : "path is " + url.pathname;
+      `),
+    );
+
+    /**
+     * The attributes that keep the page stable and cheap: a reserved box, and a deferred fetch.
+     *
+     * `width`/`height` are the declared box rather than the file's intrinsic size, which the sidecar does not store —
+     * they exist so first layout reserves the right shape and nothing below the image jumps when it arrives. `lazy`
+     * keeps a card far down a long itinerary from fetching a photograph nobody scrolled to.
+     */
+    await expect("the image defers its load and reserves its box", () =>
+      page.evaluate(`
+        const img = document.querySelector('[data-testid="landmark-photo"]');
+        if (img.getAttribute("loading") !== "lazy") return "loading is " + img.getAttribute("loading");
+        if (!img.hasAttribute("width")) return "no width attribute";
+        if (!img.hasAttribute("height")) return "no height attribute";
+        if (!(Number(img.getAttribute("width")) > 0)) return "width is " + img.getAttribute("width");
+        if (!(Number(img.getAttribute("height")) > 0)) return "height is " + img.getAttribute("height");
+        return img.alt === ${JSON.stringify(FIXTURE_MEDIA.altText)}
+          ? true
+          : "alt is " + JSON.stringify(img.alt);
+      `),
+    );
+
+    /**
+     * The photograph sits outside the selection control.
+     *
+     * The control is an `absolute inset-0` button *beneath* the content, so anything rendered inside it would hand its
+     * clicks to "select this stop". The image is not interactive, but a nested one would mean the landmark region had
+     * been moved inside the overlay — which is how the disclosure and the licence links would stop working.
+     */
+    await expect("the photograph is not inside the selection control", () =>
+      page.evaluate(`
+        const img = document.querySelector('[data-testid="landmark-photo"]');
+        const overlay = img.closest('[data-testid="itinerary-item"]')
+          .querySelector('[data-testid="select-stop"]');
+        if (!overlay) return "the card has no selection control";
+        return overlay.contains(img) ? "the image is inside the selection control" : true;
+      `),
+    );
+
+    /* -- the credit the licence obliges -------------------------------------- */
+
+    /**
+     * The source line names every project that rendered, and the photograph's exact licence.
+     *
+     * Now that a file renders, "Wikimedia Commons" must be *present* — the previous version of this check asserted the
+     * opposite, because the fixture could not produce a displayable photograph. The licence is compared verbatim: a
+     * softened "Creative Commons" would drop the version, which is the only part that states the terms.
+     */
+    await expect("the source line names both projects and the exact licence", () =>
       page.evaluate(`
         const line = document.querySelector('[data-testid="landmark-source-line"]').textContent;
         if (!line.includes("Wikidata")) return "does not name Wikidata: " + line;
-        const hasPhoto = document.querySelector('[data-testid="landmark-photo"]') !== null;
-        if (!hasPhoto && line.includes("Wikimedia Commons")) return "credits Commons with no file: " + line;
-        return line.includes("Creative Commons") ? "softened a licence" : true;
+        if (!line.includes("Wikimedia Commons")) return "does not credit Commons: " + line;
+        if (!line.includes(${JSON.stringify(FIXTURE_MEDIA.licence)})) {
+          return "does not carry the exact licence: " + line;
+        }
+        return true;
+      `),
+    );
+
+    /**
+     * Every obligation the licence creates, as separate rows.
+     *
+     * CC BY-SA is two obligations rather than one — name the creator, and link to the source — so both are checked,
+     * along with the credit line the file asks for verbatim and a working link to the licence text itself.
+     */
+    await expect("the disclosure carries creator, exact licence and credit", () =>
+      page.evaluate(`
+        const rows = document.querySelector('[data-testid="landmark-attribution"]');
+        if (!rows) return "no attribution rows";
+        const text = rows.textContent;
+        for (const required of [
+          ${JSON.stringify(FIXTURE_MEDIA.creator)},
+          ${JSON.stringify(FIXTURE_MEDIA.licence)},
+          ${JSON.stringify(FIXTURE_MEDIA.credit)},
+        ]) {
+          if (!text.includes(required)) return "missing " + JSON.stringify(required);
+        }
+        if (!text.includes("Wikimedia Commons")) return "the source is not named";
+        return true;
+      `),
+    );
+
+    await expect("the licence links to its own text, and the file to its page", () =>
+      page.evaluate(`
+        const links = [...document.querySelectorAll('[data-testid="landmark-source-link"]')];
+        const hrefs = links.map((link) => link.href);
+
+        const licence = hrefs.find((href) => href.startsWith(${JSON.stringify(FIXTURE_MEDIA.licenceUrl)}));
+        if (!licence) return "no licence link: " + hrefs.join(", ");
+
+        const filePage = ${JSON.stringify(`${wikimedia.baseUrl}/commons/wiki/file-page`)};
+        if (!hrefs.includes(filePage)) return "no file-page link: " + hrefs.join(", ");
+
+        /* Both leave the app, so both must withhold the trip URL and sever the opener. */
+        const unsafe = links.filter((link) => {
+          const rel = link.getAttribute("rel") ?? "";
+          return !rel.includes("noopener") || !rel.includes("noreferrer");
+        });
+        return unsafe.length === 0 ? true : unsafe.length + " link(s) without noopener noreferrer";
       `),
     );
 
@@ -4531,49 +4752,176 @@ async function scenarioEnrichedLandmark(chrome, fixtures) {
       `),
     );
 
-    /* -- no media, and no shell where media would have been ----------------- */
+    /* -- the disclosure is operable, and costs nothing ----------------------- */
 
     /**
-     * A card with facts and no photograph renders no media at all.
+     * The disclosure works from the keyboard, through the browser's own input pipeline.
      *
-     * This is the state the fixture produces today: the Commons body is fetched and refused, so `photo` is `null`. The
-     * refusal happens **server-side**, in `mediaHostIsAllowed` inside the enrich route, where the fixture allowance
-     * needs `NODE_ENV === "test"` — and `next dev` reports `development`. Wiring the public browser pair fixed the
-     * client half of the gate and left this half untouched.
-     *
-     * The property worth pinning meanwhile is that nothing is reserved for the missing image: a fixed-ratio box with no
-     * image in it reads as a photograph that failed to load, which is the "empty media shell" this checkpoint forbids.
+     * `<details>`/`<summary>` is native precisely so this is true without JavaScript, and a real `Input.dispatchKeyEvent`
+     * is the only way to verify it: a dispatched `KeyboardEvent` would not toggle a `<details>`, because toggling is
+     * browser behaviour rather than a listener. So this check would pass against a `<div>` if it were synthetic, which
+     * is the regression it exists to catch.
      */
-    await expect("a card with no displayable file renders no media shell", () =>
+    await expect("the disclosure toggles from the keyboard", async () => {
+      const summary = '[data-testid="landmark-source-line"]';
+      const focused = await page.focus(summary);
+      if (!focused) return "the summary did not take focus";
+
+      const openBefore = await page.check(
+        `document.querySelector('[data-testid="landmark-source"]').open`,
+      );
+      await page.press("Enter");
+      await page.sleep(200);
+      const openAfter = await page.check(
+        `document.querySelector('[data-testid="landmark-source"]').open`,
+      );
+      if (openAfter === openBefore) return "Enter did not toggle the disclosure";
+
+      /* Left open, so the link checks below act on a disclosure a reader can see. */
+      if (!openAfter) {
+        await page.press("Enter");
+        await page.sleep(200);
+      }
+      return page.check(
+        `document.querySelector('[data-testid="landmark-source"]').open`,
+      );
+    });
+
+    /**
+     * Pressing a credit link does not select the stop.
+     *
+     * Both links sit above the `absolute inset-0` selection overlay, and this is what proves it: the click is delivered
+     * to the anchor for real and must not also reach the button underneath.
+     *
+     * The default action is suppressed by a one-shot capture listener rather than followed. Both anchors are
+     * `target="_blank"`, so letting them through would open tabs — and one of them points at `creativecommons.org`,
+     * which is a live external host this suite must never contact. What is under test is where the click *lands*, and
+     * that is fully exercised with the navigation cancelled.
+     */
+    for (const [label, matcher] of [
+      ["the licence link", `href.startsWith(${JSON.stringify(FIXTURE_MEDIA.licenceUrl)})`],
+      ["the file-page link", `href === ${JSON.stringify(`${wikimedia.baseUrl}/commons/wiki/file-page`)}`],
+    ]) {
+      await expect(`clicking ${label} does not select the card`, () =>
+        page.evaluate(`
+          const link = [...document.querySelectorAll('[data-testid="landmark-source-link"]')]
+            .find((node) => { const href = node.href; return ${matcher}; });
+          if (!link) return "no such link";
+
+          const card = link.closest('[data-testid="itinerary-item"]');
+          if (card.dataset.selected !== "false") return "the card was already selected";
+
+          let reached = false;
+          const guard = (event) => { reached = true; event.preventDefault(); };
+          link.addEventListener("click", guard, true);
+          link.click();
+          link.removeEventListener("click", guard, true);
+          if (!reached) return "the click never reached the link";
+
+          /* One tick, so a selection state update would have committed if the overlay had received it. */
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          return card.dataset.selected === "false" ? true : "the card became selected";
+        `),
+      );
+    }
+
+    await expect("opening the disclosure sent no enrichment request", async () => {
+      const calls = await page.evaluate(`return window.__enrichCalls;`);
+      return calls === enrichCallsAfterRun
+        ? true
+        : `${calls} enrich request(s), was ${enrichCallsAfterRun}`;
+    });
+
+    /* -- no shell where media would have been -------------------------------- */
+
+    /**
+     * A region that reports no image reserves no space for one.
+     *
+     * Written as an invariant over every landmark region rather than as a claim about this fixture, because the accepted
+     * mode gives every enriched card a photograph — a check that asserted "this card has no image" would now be
+     * asserting the opposite of what the scenario is for. The false branch is exercised for real by the image-failure
+     * scenario, where the same regions lose their photographs after a 404, and by the three refusal fixtures.
+     *
+     * A fixed-ratio box with nothing in it reads as a photograph that failed to load, which is the empty media shell
+     * this checkpoint forbids — so `aspect-` is what the check looks for.
+     */
+    await expect("a region without an image reserves no ratio box", () =>
       page.evaluate(`
-        const region = document.querySelector('[data-testid="landmark-context"]');
-        if (region.dataset.hasImage !== "false") return "the region claims an image";
-        if (region.querySelector('[data-testid="landmark-photo"]')) return "an image element exists";
-        const reserved = [...region.querySelectorAll("*")].some(
-          (node) => typeof node.className === "string" && node.className.includes("aspect-"),
-        );
-        if (reserved) return "an empty ratio box was reserved";
-        if (!document.querySelector('[data-testid="landmark-description"]')) return "the description is missing";
-        return document.querySelector('[data-testid="landmark-facts"]') !== null
-          ? true
-          : "the facts are missing";
+        const regions = [...document.querySelectorAll('[data-testid="landmark-context"]')];
+        if (regions.length === 0) return "no landmark regions at all";
+
+        for (const region of regions) {
+          const claimsImage = region.dataset.hasImage === "true";
+          const image = region.querySelector('[data-testid="landmark-photo"]');
+
+          if (claimsImage !== (image !== null)) {
+            return "data-has-image disagrees with the DOM";
+          }
+          if (claimsImage) continue;
+
+          const reserved = [...region.querySelectorAll("*")].some(
+            (node) => typeof node.className === "string" && node.className.includes("aspect-"),
+          );
+          if (reserved) return "an empty ratio box was reserved";
+
+          /* And the text a reader came for is still there. */
+          if (!region.querySelector('[data-testid="landmark-description"]')) {
+            return "a region without an image lost its description";
+          }
+        }
+        return true;
       `),
     );
 
-    await expect("and stores no media for a refused file", async () => {
+    await expect("and stores exactly one media record for the file", async () => {
       const count = await page.evaluate(`
         const record = Object.values(window.__roamlyTripStore.getState().records)[0];
         const entries = Object.values(record.intelligence.byCanonicalPlaceId);
         return entries.flatMap((entry) => entry.media).length;
       `);
-      return count === 0 ? true : `${count} media record(s) stored`;
+      return count === 1 ? true : `${count} media record(s) stored`;
     });
 
-    await expect("and writes nothing extra for the refusal", async () => {
+    /**
+     * Whether the browser ever asked the fixture for the thumbnail.
+     *
+     * This separates the two ways a photograph can be absent from the card, which look identical in the DOM: a record
+     * the display policy refused (never requested) against one that was rendered and failed to load (requested, then
+     * `onError` unmounted the image). `data-has-image` is `false` either way, so without this the next person debugging
+     * it has to guess.
+     *
+     * In this scenario the request must both happen *and* succeed, which the decode check above establishes. The counter
+     * is kept because it is the half of the distinction the DOM cannot show, and the image-failure scenario relies on
+     * exactly the same counter to prove its 404 was genuinely attempted.
+     */
+    await expect("and the browser requested the thumbnail from the fixture", () => {
+      const asked = wikimedia.state.paths.filter((path) =>
+        path.startsWith("/media/"),
+      );
+      return asked.length > 0 ? true : `media paths requested: ${asked.length}`;
+    });
+
+    /** The stored URL is the fixture's own origin, which is what the harness allowance was for. */
+    await expect("and the stored media URL is on the fixture origin", () =>
+      page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        const entries = Object.values(record.intelligence.byCanonicalPlaceId);
+        const media = entries.flatMap((entry) => entry.media);
+        if (media.length !== 1) return "media count " + media.length;
+        const url = new URL(media[0].url);
+        if (url.protocol !== "http:") return "scheme is " + url.protocol;
+        if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+          return "host is " + url.hostname;
+        }
+        return url.port === "" ? "no explicit port" : true;
+      `),
+    );
+
+    await expect("and writes nothing extra for the render", async () => {
       const store = await readStore(page);
       return store[tripId].revision === revisionBefore + 1
         ? true
-        : "the revision moved on a media refusal";
+        : "the revision moved after the lookup settled";
     });
 
     await expect("no provider request happened for the disclosure", () => {
@@ -4783,6 +5131,362 @@ async function scenarioEnrichedLandmark(chrome, fixtures) {
   }
 }
 
+/**
+ * A displayable photograph whose URL is dead (Section 4).
+ *
+ * ## Why the fixture is a 404 rather than corrupt bytes
+ *
+ * What is under test is how the card degrades *after* a load fails — the image block leaves, the credit leaves with it,
+ * and nothing else moves. A malformed JPEG served as `image/jpeg` would also produce a failed load, but it would reach
+ * that state through Chrome's JPEG parser, which is not Roamly's to verify, and it would make the test pass or fail on
+ * decoder behaviour. A 404 fails in one place, for one reason, on every machine.
+ *
+ * It is also why the accepted fixture must stay a *valid* image: the two scenarios are only meaningful as a pair, and
+ * reusing broken bytes for both would leave nothing asserting that a good file renders.
+ *
+ * ## The record is display-eligible, and that is the point
+ *
+ * `media-broken` serves the same Commons metadata as `accepted` — same licence, same credit, same MIME, same declared
+ * dimensions — changing only which route the thumbnail names. So normalization accepts it, persistence stores it, the
+ * card derives a photograph from it, and the browser genuinely mounts an `<img>` and issues the request. Anything less
+ * would test the display policy again instead of the failure path.
+ */
+async function scenarioLandmarkImageFailure(chrome, fixtures) {
+  currentScenario = "A landmark photograph that fails to load";
+  console.log(`\n▸ ${currentScenario}`);
+
+  const gemini = await startGemini({ mode: "ok" });
+  const overpass = await startOverpass({ landmark: true });
+  const wikimedia = await startWikimedia({ mode: "media-broken" });
+  const server = await startNextServer({
+    ROAMLY_NOMINATIM_BASE_URL: fixtures.nominatim.baseUrl,
+    ROAMLY_OVERPASS_BASE_URL: overpass.baseUrl,
+    ROAMLY_VALHALLA_BASE_URL: fixtures.valhalla.baseUrl,
+    GEMINI_API_KEY: "fixture-key",
+    GEMINI_BASE_URL: gemini.baseUrl,
+    GEMINI_MODEL: "gemini-fixture",
+    ...wikimedia.env,
+    ...wikimedia.publicEnv,
+  });
+  const page = await openPage(chrome.port, "about:blank");
+
+  try {
+    await page.send("Network.setBlockedURLs", {
+      urls: ["*wikidata.org*", "*wikipedia.org*", "*wikimedia.org*"],
+    });
+
+    await page.goto(`${server.baseUrl}/`);
+
+    /*
+     * Two recorders, both installed before the trip exists.
+     *
+     * `__enrichCalls` proves the image error triggers no request. `__rejections` is the only way to see an unhandled
+     * promise rejection: it is not a thrown exception and it is not a `console.error` call, so neither
+     * `Runtime.exceptionThrown` nor the console collector would report it.
+     */
+    await page.evaluate(`
+      window.__enrichCalls = 0;
+      window.__rejections = [];
+      window.addEventListener("unhandledrejection", (event) => {
+        window.__rejections.push(String(event.reason));
+      });
+      const original = window.fetch;
+      window.fetch = (input, init) => {
+        const url = typeof input === "string" ? input : (input?.url ?? "");
+        if (url.includes("/api/place-intelligence/enrich")) window.__enrichCalls += 1;
+        return original(input, init);
+      };
+      return true;
+    `);
+
+    await submitForm(page);
+    await chooseFirstDestination(page);
+    await page.click('[data-testid="generate-with-ai"]');
+    await waitForWorkspace(page);
+    await page.waitFor(
+      `document.querySelector('[data-testid="landmark-controls"]')`,
+      { timeoutMs: 30_000, label: "the landmark panel" },
+    );
+
+    const tripId = Object.keys(await readStore(page))[0];
+    const revisionBefore = (await readStore(page))[tripId].revision;
+
+    /*
+     * A stop is selected *before* the lookup, so "the selection survives the failure" is a claim about a selection that
+     * predates it. Selecting afterwards would prove nothing about the error's effect.
+     */
+    const selectedItemId = await page.evaluate(`
+      const control = document.querySelector('[data-testid="select-stop"]');
+      control.click();
+      return control.dataset.itemId;
+    `);
+    await page.waitFor(
+      `document.querySelector('[data-testid="select-stop"][data-item-id=${JSON.stringify(selectedItemId)}]').getAttribute("aria-pressed") === "true"`,
+      { label: "the stop to be selected" },
+    );
+
+    /* -- the record is accepted, stored, and mounted ------------------------- */
+
+    await expect("the lookup accepts and stores the media record", async () => {
+      await page.click('[data-testid="run-landmarks"]');
+      await page.waitFor(
+        `["complete","partial","empty","failed","conflict"].includes(
+           document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus
+         )`,
+        { timeoutMs: 60_000, label: "the lookup to settle" },
+      );
+
+      const status = await page.evaluate(`
+        return document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus;
+      `);
+      if (status !== "complete" && status !== "partial") return `settled as ${status}`;
+
+      return page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        const entries = Object.values(record.intelligence.byCanonicalPlaceId);
+        const media = entries.flatMap((entry) => entry.media);
+        if (media.length !== 1) return media.length + " media record(s)";
+        const url = new URL(media[0].url);
+        if (!["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+          return "host is " + url.hostname;
+        }
+        return url.pathname === "/media/broken.jpg" ? true : "path is " + url.pathname;
+      `);
+    });
+
+    /** The counters and the snapshot to compare everything against, taken once the write has landed. */
+    const apiCallsAfterRun =
+      wikimedia.state.entity + wikimedia.state.commons + wikimedia.state.sparql;
+    const enrichCallsAfterRun = await page.evaluate(
+      `return window.__enrichCalls;`,
+    );
+    const snapshotAfterRun = await page.evaluate(`
+      const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+      return JSON.stringify({
+        plan: record.plan,
+        history: { past: record.history.past.length, future: record.history.future.length },
+      });
+    `);
+
+    /* -- the failure settles -------------------------------------------------- */
+
+    /**
+     * The image is attempted, and only then removed.
+     *
+     * The wait is on `data-has-image` rather than on the element, because the element's absence is also the state before
+     * it ever mounted — waiting on the flag means the assertion below cannot pass by arriving too early.
+     */
+    await expect("the image is attempted and then removed", async () => {
+      await page.evaluate(`
+        document.querySelector('[data-testid="landmark-context"]').scrollIntoView({ block: "center" });
+        return true;
+      `);
+      await page.waitFor(
+        `document.querySelector('[data-testid="landmark-context"]').dataset.hasImage === "false"`,
+        { timeoutMs: 20_000, label: "the failed image to be removed" },
+      );
+
+      /*
+       * The fixture's own counter, which is what proves the request was really made.
+       *
+       * Without it, "no image on the card" is indistinguishable from a record the display policy refused before any
+       * request existed — the two states have identical DOM.
+       */
+      const asked = wikimedia.state.paths.filter((path) =>
+        path.startsWith("/media/broken"),
+      );
+      if (asked.length === 0) return "the broken thumbnail was never requested";
+
+      return page.evaluate(`
+        const region = document.querySelector('[data-testid="landmark-context"]');
+        if (region.querySelector('[data-testid="landmark-photo"]')) return "the image is still mounted";
+        const reserved = [...region.querySelectorAll("*")].some(
+          (node) => typeof node.className === "string" && node.className.includes("aspect-"),
+        );
+        return reserved ? "an empty ratio box was left behind" : true;
+      `);
+    });
+
+    await expect("the factual context survives the failure intact", () =>
+      page.evaluate(`
+        const region = document.querySelector('[data-testid="landmark-context"]');
+        const heading = document.getElementById(region.getAttribute("aria-labelledby"));
+        if (!heading || !heading.textContent.includes("Factual context")) {
+          return "the heading is gone";
+        }
+        const description = region.querySelector('[data-testid="landmark-description"]');
+        if (!description || description.textContent.trim().length === 0) {
+          return "the description is gone";
+        }
+        const facts = region.querySelector('[data-testid="landmark-facts"]');
+        if (!facts) return "the facts are gone";
+        return facts.textContent.includes("Dates from") ? true : facts.textContent;
+      `),
+    );
+
+    /**
+     * The credit leaves with the image.
+     *
+     * A card still naming Wikimedia Commons and still printing `CC-BY-SA-4.0` would be claiming a use of somebody's
+     * photograph that did not happen — the same error, in the same words, that this module refuses to make when the
+     * display policy refuses a file. Wikidata stays named, because its description and facts are still on screen.
+     */
+    await expect("the photograph's credit leaves with the photograph", () =>
+      page.evaluate(`
+        const region = document.querySelector('[data-testid="landmark-context"]');
+        const line = region.querySelector('[data-testid="landmark-source-line"]').textContent;
+        if (!line.includes("Wikidata")) return "stopped crediting Wikidata: " + line;
+        if (line.includes("Wikimedia Commons")) return "still credits Commons: " + line;
+        if (line.includes(${JSON.stringify(FIXTURE_MEDIA.licence)})) {
+          return "still prints the licence: " + line;
+        }
+
+        const rows = region.querySelector('[data-testid="landmark-attribution"]');
+        const text = rows ? rows.textContent : "";
+        for (const gone of [
+          ${JSON.stringify(FIXTURE_MEDIA.creator)},
+          ${JSON.stringify(FIXTURE_MEDIA.licence)},
+          ${JSON.stringify(FIXTURE_MEDIA.credit)},
+        ]) {
+          if (text.includes(gone)) return "still shows " + JSON.stringify(gone);
+        }
+        return region.querySelector('[data-testid="landmark-photo"]') === null
+          ? true
+          : "the image is still there";
+      `),
+    );
+
+    /* -- and nothing else moved ---------------------------------------------- */
+
+    await expect("the image error wrote nothing to the store", async () => {
+      const store = await readStore(page);
+      if (store[tripId].revision !== revisionBefore + 1) {
+        return `revision is ${store[tripId].revision}, expected ${revisionBefore + 1}`;
+      }
+      const now = await page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        return JSON.stringify({
+          plan: record.plan,
+          history: { past: record.history.past.length, future: record.history.future.length },
+        });
+      `);
+      return now === snapshotAfterRun
+        ? true
+        : "the plan or the undo history changed";
+    });
+
+    await expect("the image error sent no request of any kind", async () => {
+      const apiCalls =
+        wikimedia.state.entity + wikimedia.state.commons + wikimedia.state.sparql;
+      if (apiCalls !== apiCallsAfterRun) {
+        return `${apiCalls} provider calls, was ${apiCallsAfterRun}`;
+      }
+      const enrichCalls = await page.evaluate(`return window.__enrichCalls;`);
+      return enrichCalls === enrichCallsAfterRun
+        ? true
+        : `${enrichCalls} enrich request(s), was ${enrichCallsAfterRun}`;
+    });
+
+    await expect("the selected stop is still selected", () =>
+      page.evaluate(`
+        const id = ${JSON.stringify(selectedItemId)};
+        const control = document.querySelector('[data-testid="select-stop"][data-item-id="' + id + '"]');
+        if (!control) return "the stop is gone";
+        if (control.getAttribute("aria-pressed") !== "true") return "the stop was deselected";
+        const card = control.closest('[data-testid="itinerary-item"]');
+        return card.dataset.selected === "true" ? true : "the card reports itself unselected";
+      `),
+    );
+
+    /** The map's highlight is separate state, and an image error must not disturb it either. */
+    await expect("the map still highlights the same stop", () =>
+      page.evaluate(`
+        const id = ${JSON.stringify(selectedItemId)};
+        const marker = document.querySelector(
+          '[data-item-id="' + id + '"][aria-pressed]:not([data-testid="select-stop"])',
+        );
+        if (!marker) return "no map marker for the selected stop";
+        return marker.getAttribute("aria-pressed") === "true"
+          ? true
+          : "the marker is not highlighted";
+      `),
+    );
+
+    /* -- the surface --------------------------------------------------------- */
+
+    /**
+     * The cards below do not move into each other.
+     *
+     * Removing the image removes a `16/9` box, so the card genuinely gets shorter — that is expected and is not what
+     * this checks. What must not happen is two cards occupying the same space, which is what a height collapse handled
+     * badly looks like.
+     */
+    await expect("no two cards overlap after the image was removed", () =>
+      page.evaluate(`
+        const cards = [...document.querySelectorAll('[data-testid="itinerary-item"]')];
+        if (cards.length < 2) return "fewer than two cards, so this proves nothing";
+        const boxes = cards.map((card) => card.getBoundingClientRect());
+        for (let index = 1; index < boxes.length; index += 1) {
+          const previous = boxes[index - 1];
+          const current = boxes[index];
+          if (previous.height <= 0 || current.height <= 0) return "a card has no height";
+          /* One pixel of tolerance, for a border that rounds. */
+          if (current.top + 1 < previous.bottom) {
+            return "cards " + (index - 1) + " and " + index + " overlap";
+          }
+        }
+        return true;
+      `),
+    );
+
+    await expect("the page never scrolls sideways", () =>
+      noHorizontalOverflow(page),
+    );
+
+    await expect("the degraded card fits a narrow screen", async () => {
+      await page.setViewport(390, 844);
+      await page.sleep(400);
+      const fits = await noHorizontalOverflow(page);
+      const visible = await page.check(
+        `document.querySelector('[data-testid="landmark-context"]').getBoundingClientRect().width <= window.innerWidth + 1`,
+      );
+      await page.send("Emulation.clearDeviceMetricsOverride");
+      await page.sleep(200);
+      if (!fits) return "the page scrolls sideways at 390px";
+      return visible ? true : "the landmark region is wider than the viewport";
+    });
+
+    await expect("no unhandled rejection came from the failed image", async () => {
+      const rejections = await page.evaluate(`return window.__rejections;`);
+      return rejections.length === 0 ? true : rejections.join(" | ");
+    });
+
+    await expect("no React exception was thrown", () =>
+      page.pageErrors.length === 0 ? true : page.pageErrors.join(" | "),
+    );
+
+    /**
+     * No console error from *application* code.
+     *
+     * A failed image is a resource error. Chrome reports it to the DevTools console — and it arrives over
+     * `Log.entryAdded`, which this harness does not subscribe to, not over `Runtime.consoleAPICalled`. So it will not
+     * appear here, and that is expected rather than a gap being papered over.
+     *
+     * The inverse must not be read into this either: an empty console is **not** evidence that the image loaded. The
+     * only things that establish the request happened and failed are the fixture's own path counter and
+     * `data-has-image` flipping to `false`, both asserted above.
+     */
+    await expect("no console errors or hydration warnings were logged", () => {
+      const problems = consoleProblems(page);
+      return problems.length === 0 ? true : problems.join(" | ");
+    });
+  } finally {
+    await page.close();
+    await server.close();
+    await closeAll([gemini, overpass, wikimedia]);
+  }
+}
+
 async function main() {
   const chrome = await launchChrome();
   console.log(`Chrome: ${chrome.version["User-Agent"]}`);
@@ -4883,6 +5587,7 @@ async function main() {
     await scenarioEditingControls(chrome, fixtures);
     await scenarioLandmarkContext(chrome, fixtures);
     await scenarioEnrichedLandmark(chrome, fixtures);
+    await scenarioLandmarkImageFailure(chrome, fixtures);
     await scenarioRefinementRefused(chrome, fixtures);
   } finally {
     await closeAll([nominatim, overpass, valhalla, gemini]);
