@@ -349,10 +349,19 @@ cost position offset a fatal licensing one, and two of the candidates fail on ex
 
 ### Decision
 
-- **First place-enrichment provider: Foursquare Places** — conditional on resolving the caching
-  duration, the CPM denominator, and the Visual Crediting Policy.
-- **Public landmarks: Wikimedia Commons + Wikidata** — adopted. Wikidata is licence-clean; Commons is
-  adopted for media with per-file provenance mandatory.
+> **Updated at Checkpoint 5B (shipped).** The ordering below was written before implementation, and the
+> sequencing it implies is **obsolete**. Wikidata and Commons shipped *first*, and **Foursquare is not
+> required for launch** — not for landmark enrichment, not for the launch roadmap, and not for anything
+> currently in the product. Its conditions remain unresolved and it remains unimplemented and unpersisted;
+> that is a settled state rather than a blocker. Read the Foursquare bullet as "a candidate if place
+> enrichment is ever extended to commercial venues", which is not planned.
+
+- **Public landmarks: Wikimedia Commons + Wikidata** — **adopted and shipped** (Checkpoint 5B). Wikidata is
+  licence-clean; Commons is adopted for media with per-file provenance mandatory. No credential of any kind,
+  which is why this is the enrichment that could ship. See `docs/PLACE_INTELLIGENCE.md`.
+- **Commercial venue enrichment: none, and none required.** Foursquare Places was the leading candidate and
+  stays unadopted pending its caching duration, the CPM denominator, and the Visual Crediting Policy. Nothing
+  in the product depends on it.
 - **Weather: Open-Meteo** — adopted for the non-commercial prototype, with the commercial-use limit
   recorded as a release blocker.
 - **Crowding: none.** Rejected on cost and on the gap between what the data supports and what the
@@ -408,7 +417,8 @@ quietly widen it.
 # Checkpoint 5B — Wikidata and Wikimedia Commons, endpoint-level
 
 **Researched:** 2026-07-28, Wikimedia Foundation and MediaWiki documentation only.
-**Status:** research gate for landmark enrichment. Implementation may not exceed what is resolved below.
+**Status:** **implemented and shipped.** This section remains the research gate — implementation may not
+exceed what is resolved below. For what was actually built against it, see `docs/PLACE_INTELLIGENCE.md`.
 
 ## Endpoints selected
 

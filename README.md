@@ -28,6 +28,14 @@ Runs with **no API key, no database, no billing account and no cloud project**.
 6. The result is validated against the set, and only then saved — in your browser.
 7. Afterwards you can calculate real walking and driving routes, check opening hours, and edit the
    itinerary in bounded ways.
+8. If you **ask it to**, it looks up the landmarks in your trip on Wikidata and Wikimedia Commons and adds a
+   short description, a founding year and one properly licensed photograph.
+
+Step 8 never happens on its own — not on landing, not during generation, not when you open a saved trip.
+Wikimedia is volunteer-funded and the lookup is deliberately serial, so it runs only when you press
+something. It covers **landmarks only**: no restaurants, no cafés, no ordinary hotels, and no ratings,
+reviews, popularity or live prices from anywhere. See
+[`docs/PLACE_INTELLIGENCE.md`](docs/PLACE_INTELLIGENCE.md).
 
 ---
 
@@ -420,7 +428,12 @@ WebGL sees — but it is not what the map looks like in a browser.
   the immutable plan builder, opening-hours and cost models, structural editing, the pool lifecycle
 - [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md) — what shipped in each phase, every deviation, and every
   known limitation
+- [`docs/PLACE_INTELLIGENCE.md`](docs/PLACE_INTELLIGENCE.md) — landmark enrichment: scope, identity ranking,
+  the licence gates, budgets and continuation, what a card may show, and the current limitations
+- [`docs/PROVIDER_RESEARCH.md`](docs/PROVIDER_RESEARCH.md) — which external providers were evaluated, the
+  licence terms behind each verdict, and what Roamly may fetch, persist, export and display
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — deploying, verifying, rolling back
+- [`docs/LAUNCH_CHECKLIST.md`](docs/LAUNCH_CHECKLIST.md) — the exact pre-deploy and smoke checklist
 - [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md) — a two-minute walkthrough
 
 ---
@@ -432,5 +445,10 @@ Tiles and style by [OpenFreeMap](https://openfreemap.org) using
 [OpenMapTiles](https://openmaptiles.org). Geocoding by [Nominatim](https://nominatim.org); place data
 via the [Overpass API](https://overpass-api.de); routing by [Valhalla](https://valhalla.github.io/valhalla/).
 Rendering by [MapLibre GL JS](https://maplibre.org).
+
+Landmark facts from [Wikidata](https://www.wikidata.org) (CC0). Landmark photographs from
+[Wikimedia Commons](https://commons.wikimedia.org), each under **its own licence**, credited to its own
+creator on the card that shows it — Roamly refuses any file whose licence it cannot identify exactly, and
+never modifies the image. Neither requires a credential.
 
 Everything above is free and open source.

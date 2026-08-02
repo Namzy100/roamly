@@ -89,6 +89,37 @@ please open an issue.
 Set these in **Project → Settings → Environment Variables**. Every one is optional; see
 `.env.example` for the full annotated list.
 
+> ### `ROAMLY_CONTACT_URL` — optional, but set it
+>
+> It is the one variable that changes behaviour rather than capability. It becomes the contact information in
+> the outbound `User-Agent` sent to Nominatim, Overpass and **Wikimedia**.
+>
+> Wikimedia has required a descriptive `User-Agent` since 2010, answers **HTTP 403** without one, and may
+> block a client without notice. So Roamly validates it locally, before opening a socket, and **refuses rather
+> than degrades**: it must be a public `https:` URL. An `http:` URL, `localhost`, or a bare email address is
+> rejected.
+>
+> When it is invalid, `POST /api/place-intelligence/enrich` answers **503 `provider_misconfigured`** —
+> deliberately not a tidy 200 with an `abandoned` code. Dressing an operator's problem up as a provider
+> outcome is how it survives to production. The response names the variable to set and nothing else: no value,
+> no host, no header.
+>
+> Unset is safe — a project default is substituted — but it points at this project rather than at you.
+>
+> **Wikidata and Commons need no credential of any kind.** There is no key to configure.
+
+> ### Variables that must NOT be set
+>
+> The Wikimedia endpoint overrides (`ROAMLY_WIKIDATA_ENTITY_BASE_URL`, `ROAMLY_WIKIDATA_API_URL`,
+> `ROAMLY_WIKIDATA_SPARQL_URL`, `ROAMLY_COMMONS_API_URL`, `ROAMLY_WIKIPEDIA_API_URL_TEMPLATE`) and every
+> browser-harness variable (`ROAMLY_BROWSER_FIXTURE_RUN`, `ROAMLY_WIKIMEDIA_FIXTURE_MODE`,
+> `ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN`, `ROAMLY_ENRICHMENT_BUDGET_MS`, `ROAMLY_WIKIMEDIA_CACHE_DISABLED`, and the
+> two `NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_*` values) are **test infrastructure**. Leave them unset.
+>
+> They cannot activate on Vercel — the gate requires `NODE_ENV === "development"` and the absence of every
+> deployment marker, and `VERCEL` is one of those markers — but confirming their absence is how you notice a
+> copied `.env` before it confuses somebody. `docs/LAUNCH_CHECKLIST.md` §A3 is the checklist.
+
 | Variable | Effect if unset |
 | --- | --- |
 | `ROAMLY_AI_PROVIDER` | `auto` — Gemini if keyed, else Ollama if configured, else Demo Planner |
@@ -148,6 +179,15 @@ Then check by hand:
 - [ ] The Demo Planner produces a trip with no key configured
 - [ ] Gemini appears **only** if you set a key
 - [ ] The map renders; if you disable WebGL, the schematic fallback appears
+- [ ] **No Wikimedia request on landing, during generation, or when a saved trip is opened** — filter the
+      network panel for `wikidata`, `wikipedia`, `wikimedia` and expect zero. Enrichment is explicit-only, so
+      a request here is the design failing silently.
+- [ ] The landmark action appears only on trips with eligible landmarks, and completes when pressed
+- [ ] The exact licence and creator are visible on an enriched card
+
+**`docs/LAUNCH_CHECKLIST.md` is the full smoke checklist** — attribution, image-failure degradation, cancel
+and clear semantics, import/export, old trips, mobile, and the client-bundle check. Work through it for a
+release; the list above is the quick pass.
 - [ ] Calculating routes draws real geometry
 - [ ] A saved trip survives a reload
 - [ ] Export downloads a JSON file; importing it back produces a second copy

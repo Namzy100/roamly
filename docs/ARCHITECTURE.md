@@ -521,6 +521,32 @@ not be removed, hidden or shortened into illegibility. This is a plain reading o
 licence requirement and not legal advice; anyone shipping this commercially should read
 the ODbL themselves.
 
+### Wikidata and Wikimedia Commons — landmark enrichment
+
+The fourth external contract, and the only one a traveller has to *ask* for. Full detail in
+`docs/PLACE_INTELLIGENCE.md`; the architectural shape is:
+
+- **`lib/place-intelligence/`** — the provider-independent contract. A fact vocabulary, a provenance record,
+  a trust ranking, and two policy modules. **No client, no key, no fetch, no adapter anywhere in it**, which
+  is what lets a licence rule be unit-tested without a network.
+- **`lib/providers/place-intelligence/`** — the execution. `server-only`, one outbound HTTP path, five
+  permitted requests expressed as a closed union so no caller can supply a host, a path or a query fragment.
+- **`app/api/place-intelligence/enrich`** — a provider boundary that persists nothing, mutates nothing and
+  returns no trip. It carries no `tripId`, because the server could neither verify nor use one.
+- **The browser folds the outcomes in** and performs one guarded save, under the revision it read before
+  starting — the shape `refresh-pool` established.
+
+The dependency points one way: the contract knows nothing about Wikimedia, and the adapter is the only thing
+that turns a provider's shape into Roamly's vocabulary.
+
+**Nothing runs implicitly.** No request on landing, during generation, on trip open, or on render. Enrichment
+is serial by Wikimedia's etiquette, so a full trip takes seconds — which is precisely why it cannot sit on a
+page load.
+
+**The sidecar never becomes the place.** It is stored beside the plan, keyed by canonical place id, and
+OpenStreetMap remains the authority for identity and category. Enrichment has no code path that could produce
+a `TripPlace`.
+
 ### Valhalla — routing
 
 ```

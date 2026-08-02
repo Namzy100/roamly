@@ -1693,6 +1693,132 @@ observability, and they carry no travel data by design.
 
 ---
 
+## Checkpoint 5A / 5B — Place intelligence: landmark enrichment ✅ SHIPPED
+
+> **Two numbering schemes, and they are not the same one.** "Checkpoint 5A/5B" is the place-intelligence
+> series used throughout `lib/place-intelligence/` comments — 5A is the provider-independent contract, 5B is
+> the Wikidata/Commons implementation. "Phase 5A/5B" above is trip generation. They are independent and were
+> built in different phases. This section is deliberately not renumbered into the phase sequence, because
+> "After deployment" below records that there is no Phase 8 feature plan.
+
+**Full documentation:** `docs/PLACE_INTELLIGENCE.md`. **Research gate:** `docs/PROVIDER_RESEARCH.md`.
+
+### What shipped
+
+Landmark context on itinerary cards — a description, a founding year, a heritage designation, an official
+website, and one licensed Commons photograph — sourced from Wikidata (CC0) and Wikimedia Commons (per-file
+licence), with no credential of any kind.
+
+- **Explicit only.** No request on landing, during generation, on trip open, or on render.
+- **Landmarks only.** A closed category allow-list; no restaurant, café, bar or ordinary hotel.
+- **No ratings, reviews, popularity, crowding or live prices** — refused at the fact-kind level.
+- **12 places per trip, at most 3 HTTP calls per action, a 90 s server budget** under a 120 s route ceiling.
+- **Serial**, because Wikimedia publishes no numeric read limit and etiquette asks for it.
+- **One user action performs at most one guarded save**, increments the revision at most once, and creates
+  **no undo history**.
+- **Cancel writes nothing**; a cancelled refresh preserves the existing sidecar byte-for-byte.
+- **Rendered attribution matches visible content** — a failed image takes its Commons credit with it, while
+  Wikidata attribution for the still-rendered facts remains.
+- **Canonical OSM identity is never changed.** Enrichment has no way to write a `TripPlace`.
+
+### Verification
+
+| Gate | Result |
+| --- | --- |
+| `npm run typecheck` | clean |
+| `npm run lint` | clean |
+| `npm test` | **2,299 tests / 111 files** |
+| `npm run verify:browser` | **382 / 382** |
+| `npm run build` | succeeds |
+
+### Measured performance
+
+**Every number below is a FIXTURE measurement** taken over loopback under `next dev`, against the local
+Wikimedia fixture server. They measure **Roamly's own overhead** — request construction, validation,
+normalisation, merge, serialisation — with provider latency held near zero. They are **not** measurements of
+real Wikidata or Commons latency, and no figure here should be read as a production response time.
+
+| Scenario | Places | Duration | Provider requests | API response | Sidecar |
+| --- | --- | --- | --- | --- | --- |
+| Direct-QID, **cold** | 1 | 104 ms | 2 | 3,088 B | 2,447 B |
+| Direct-QID, **warm** (cache hit) | 1 | 7 ms | **0** | 3,088 B | 2,447 B |
+| Wikipedia-title flow | 1 | 8 ms | 1 | 3,156 B | 2,515 B |
+| Nearby search (unmatched) | 1 | 6 ms | 1 | 215 B | — |
+| Action, nearby rung | 1 | 5 ms | 1 | 215 B | — |
+| Action, nearby rung | 5 | 9 ms | 5 | 743 B | — |
+| Action, nearby rung | 12 | 13 ms | 12 | 1,667 B | — |
+
+The nearby rung is used for the cost curve because each untagged place is one genuine lookup. The QID rung
+cannot show a curve against this fixture: it answers **every** QID with the same entity, so beyond the first
+place the identity-collision guard correctly sends the rest to review.
+
+**Continuation:** not triggered in these runs — every action completed within one call, so `calls = 1` and
+`abandoned = null` throughout. The continuation path is exercised by the browser harness, which shortens the
+server budget to force a genuine `budget_exhausted`.
+
+**Trip record, before and after**
+
+| | Bytes |
+| --- | --- |
+| Plan | 24,910 |
+| Place pool | 3,897 |
+| **Record before intelligence** | **28,864** |
+| **Record after** (1 matched landmark) | **31,389** |
+| **Delta** | **+2,525 B (+8.7 %)** |
+
+Per matched landmark the sidecar costs **~2.4–2.5 KB**. The delta scales with the number of *matched*
+landmarks, not with trip size.
+
+**Client bundles**
+
+| | Raw | gzip |
+| --- | --- | --- |
+| Landing `/` first load — 15 JS chunks | 1,214.8 KB | **350.7 KB** |
+| Landing `/` CSS | 64.0 KB | 11.9 KB |
+| **Landing total** | 1,278.8 KB | **362.6 KB** |
+
+MapLibre is **absent** from the landing bundle (verified by content search), so the map cost is not paid until
+a trip is opened.
+
+**Saved-trip route bundle: not measured.** `/trip/[tripId]` is server-rendered on demand, so no prerendered
+HTML exists to derive its chunk list from, and Turbopack emits no per-route size table. Deriving it would
+require a live browser capture, which this pass did not run. Recorded as unavailable rather than estimated.
+
+**Historical before/after bundle sizes: unavailable.** No pre-Checkpoint-5B bundle measurement was recorded,
+so the incremental client cost of landmark rendering cannot be stated. Not estimated.
+
+**Card render:** no measurement was taken for the three card states (no context / description / description
+plus image). The rendering work is a handful of DOM nodes with no computation behind it, but that is a reason
+to expect it to be cheap, not a measurement — recorded as unavailable.
+
+**Provider adapter absent from client chunks — verified.** Searching every file under `.next/static/` for
+`query.wikidata.org`, `Special:EntityData`, `wbgetentities`, `commons.wikimedia.org/w/api.php`,
+`wikibase:around`, `iiextmetadatafilter`, `COMMONS_LICENCES`, the `User-Agent` string and `maxlag` returns
+**zero client files** for every marker. The same search over `.next/server/` matches, and a search for
+`landmark-context` matches in client chunks — so the method is sound and the absence is real rather than a
+mis-aimed search.
+
+**No provider request on landing, during generation, or on trip open** — asserted by the browser harness with
+a request counter installed before the trip exists. **No offscreen image preload** (the `<img>` is
+`loading="lazy"` with no preload hint) and **no map rerender caused by image loading** (the `onError` handler
+sets one component-local boolean and touches no store).
+
+### Security review disposition
+
+No unresolved high-severity finding. One high-severity **correctness** defect was found and fixed during this
+review:
+
+- **`articleTitleProblem` refused every ordinary article title.** The `CONTROL_CHARACTERS` class in
+  `resolve.ts` had collapsed to a range from **space to hyphen**, so any title containing a space was rejected
+  as holding a control character — while real control characters passed. Because the refusal throws
+  `misconfigured`, whose `abandonsRun` is true, a single `wikipedia`-tagged place **ended the whole trip's
+  enrichment run** and reported the deployment as unconfigured. Rung 2 was inoperative and had no end-to-end
+  coverage, which is why it survived. Fixed; the two sibling constants — correct, but holding raw control
+  bytes that made their files `grep`-invisible as binary — were rewritten as `\u` escapes so the same
+  corruption is visible next time. A regression test in `smoke.test.ts` asserts both directions.
+
+---
+
 ## After deployment
 
 Only bug fixes, security fixes, infrastructure replacement, evidence-based performance work and

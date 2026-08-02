@@ -29,6 +29,7 @@ import {
   normalizeFileMetadata,
   normalizeNearbyCandidate,
 } from "./normalize";
+import { articleTitleProblem } from "./resolve";
 import {
   parseBatchEntitiesResponse,
   parseEntityDataResponse,
@@ -103,6 +104,31 @@ describe("wikimedia fixtures", () => {
     expect(
       disambiguation.pages[0].pageprops?.disambiguation,
     ).not.toBeUndefined();
+  });
+
+  /**
+   * The guard that decides whether an OSM `wikipedia` tag may be resolved at all.
+   *
+   * Regression coverage, and the regression was not a near miss. `CONTROL_CHARACTERS` had collapsed into a range from
+   * space to hyphen, so *every* ordinary title — anything containing a space — was refused as holding a control
+   * character, while a real control character passed. `articleTitleProblem` throws `misconfigured`, whose
+   * `abandonsRun` is true, so one such place ended the whole trip's run and reported the deployment as unconfigured.
+   *
+   * Both directions are asserted, because repairing only the false positive would leave the guard doing nothing.
+   */
+  it("accepts an ordinary article title and refuses a control character", () => {
+    /* Characters the broken range spanned: space, and the punctuation up to `-`. */
+    expect(articleTitleProblem("Eiffel Tower")).toBeNull();
+    expect(articleTitleProblem("Mosteiro dos Jerónimos")).toBeNull();
+    expect(articleTitleProblem("Sant'Angelo (Rome)")).toBeNull();
+    expect(articleTitleProblem("Saint-Germain-des-Prés")).toBeNull();
+
+    /* And the characters it was meant to span, which it had stopped matching entirely. */
+    for (const code of [0x00, 0x07, 0x1f, 0x7f]) {
+      expect(articleTitleProblem(`Eiffel${String.fromCharCode(code)}Tower`)).toBe(
+        "The article title contains a control character.",
+      );
+    }
   });
 
   it("normalizes nearby bindings and refuses a foreign host", () => {

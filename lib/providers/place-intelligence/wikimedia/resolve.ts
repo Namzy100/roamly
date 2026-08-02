@@ -46,8 +46,20 @@ import { parsePagePropsResponse } from "./schemas";
 /** Matches the bound `parseWikipediaTag` already applies, so a tag that passed there passes here. */
 const MAX_TITLE_LENGTH = 250;
 
-/** Control characters, which are never in a page title and are a header- or query-injection smell. */
-const CONTROL_CHARACTERS = /[ --]/;
+/**
+ * Control characters, which are never in a page title and are a header- or query-injection smell.
+ *
+ * Written as `\u` escapes rather than as the literal bytes. The literal form is what this constant held until it
+ * was found to have collapsed into a range from **space to hyphen** — which matched every ordinary title
+ * containing a space, and matched no control character at all. Both halves of that failure were invisible: a range
+ * of raw control bytes is unreadable in a diff, and a source file carrying a NUL byte is skipped by `grep` as
+ * binary, so the constant could not be found by searching for it either.
+ *
+ * The consequence was not one refused place. `articleTitleProblem` throws `misconfigured`, and
+ * `WikimediaError.abandonsRun` is true for that kind — so a single `wikipedia`-tagged place ended the whole
+ * trip's enrichment run and reported the deployment as unconfigured.
+ */
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 
 export type TitleResolution =
   | {
