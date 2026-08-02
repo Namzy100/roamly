@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { mediaHostIsAllowed } from "@/lib/providers/place-intelligence/wikimedia/config";
 
-import { isFixtureLoopbackUrl } from "./fixture-origin";
+import {
+  fixtureCacheIsDisabled,
+  fixtureEnrichmentBudgetMs,
+  isFixtureLoopbackUrl,
+} from "./fixture-origin";
 import { urlIsSafe } from "./provenance";
 
 /**
@@ -45,6 +49,8 @@ const KEYS = [
   "NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_MODE",
   "NEXT_PUBLIC_ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN",
   "ROAMLY_BROWSER_FIXTURE_RUN",
+  "ROAMLY_ENRICHMENT_BUDGET_MS",
+  "ROAMLY_WIKIMEDIA_CACHE_DISABLED",
   "ROAMLY_WIKIDATA_ENTITY_BASE_URL",
   "ROAMLY_WIKIDATA_API_URL",
   "ROAMLY_WIKIDATA_SPARQL_URL",
@@ -711,6 +717,140 @@ describe("candidate URLs that are not the fixture's", () => {
       "",
     ]) {
       expect(urlIsSafe(hostile), hostile).toBe(false);
+    }
+  });
+});
+
+/**
+ * The shortened enrichment budget, and every way it must refuse.
+ *
+ * This is the only value in the module that changes what the *server* does rather than which URLs it will accept, so
+ * the question it has to answer is narrower: can a served application ever see it? Every case below is a way the answer
+ * could have been yes.
+ */
+describe("the fixture enrichment budget", () => {
+  it("is offered to a permitted browser-harness run", () => {
+    harnessPermitted({ ROAMLY_ENRICHMENT_BUDGET_MS: "900" });
+
+    expect(fixtureEnrichmentBudgetMs()).toBe(900);
+  });
+
+  it("is offered to a permitted unit-test process", () => {
+    configure({
+      NODE_ENV: "test",
+      ROAMLY_WIKIMEDIA_FIXTURE_MODE: "1",
+      ROAMLY_WIKIMEDIA_FIXTURE_ORIGIN: FIXTURE_ORIGIN,
+      ROAMLY_ENRICHMENT_BUDGET_MS: "1200",
+    });
+
+    expect(fixtureEnrichmentBudgetMs()).toBe(1200);
+  });
+
+  /** The whole point. Without the gate this variable would be a way to cripple a real deployment's budget. */
+  it("is refused when no fixture allowance is in force", () => {
+    configure({ ROAMLY_ENRICHMENT_BUDGET_MS: "900" });
+
+    expect(fixtureEnrichmentBudgetMs()).toBeNull();
+  });
+
+  it("is refused to a served process even with every other variable set", () => {
+    harnessPermitted({
+      NODE_ENV: "production",
+      ROAMLY_ENRICHMENT_BUDGET_MS: "900",
+    });
+
+    expect(fixtureEnrichmentBudgetMs()).toBeNull();
+  });
+
+  it("is refused when a deployment marker is present", () => {
+    harnessPermitted({ VERCEL: "1", ROAMLY_ENRICHMENT_BUDGET_MS: "900" });
+
+    expect(fixtureEnrichmentBudgetMs()).toBeNull();
+  });
+
+  /** Isolation is a precondition of the allowance, exactly as it is for a media URL. */
+  it("is refused when an endpoint still points upstream", () => {
+    harnessPermitted({
+      ROAMLY_COMMONS_API_URL: "https://commons.wikimedia.org/w/api.php",
+      ROAMLY_ENRICHMENT_BUDGET_MS: "900",
+    });
+
+    expect(fixtureEnrichmentBudgetMs()).toBeNull();
+  });
+
+  it("is absent when the variable is unset", () => {
+    harnessPermitted();
+
+    expect(fixtureEnrichmentBudgetMs()).toBeNull();
+  });
+
+  /**
+   * A malformed value leaves the real budget standing rather than becoming one.
+   *
+   * `Number("")` is `0` and `Number("abc")` is `NaN`, and either reaching the deadline would abandon the run before its
+   * first place — which presents as a broken feature rather than as the typo it is.
+   */
+  it("refuses anything that is not a positive integer", () => {
+    for (const value of ["0", "-1", "abc", "", " 900 ", "1e3", "9.5", "+900"]) {
+      harnessPermitted({ ROAMLY_ENRICHMENT_BUDGET_MS: value });
+      expect(fixtureEnrichmentBudgetMs(), value).toBeNull();
+    }
+  });
+
+  /** It may only ever make the server stricter, so a value near the real budget is a mistake rather than an intent. */
+  it("refuses a value above the fixture ceiling", () => {
+    harnessPermitted({ ROAMLY_ENRICHMENT_BUDGET_MS: "30000" });
+    expect(fixtureEnrichmentBudgetMs()).toBe(30_000);
+
+    harnessPermitted({ ROAMLY_ENRICHMENT_BUDGET_MS: "30001" });
+    expect(fixtureEnrichmentBudgetMs()).toBeNull();
+
+    harnessPermitted({ ROAMLY_ENRICHMENT_BUDGET_MS: "90000" });
+    expect(fixtureEnrichmentBudgetMs()).toBeNull();
+  });
+});
+
+/**
+ * The cache bypass, which exists so a refresh can be caught in flight.
+ *
+ * It is the mildest of the three allowances — the worst a mistake could do is make a run slower — and it is gated
+ * identically anyway, because a policy with one exception is a policy with two.
+ */
+describe("the fixture cache bypass", () => {
+  it("is offered to a permitted browser-harness run", () => {
+    harnessPermitted({ ROAMLY_WIKIMEDIA_CACHE_DISABLED: "1" });
+
+    expect(fixtureCacheIsDisabled()).toBe(true);
+  });
+
+  it("is refused when no fixture allowance is in force", () => {
+    configure({ ROAMLY_WIKIMEDIA_CACHE_DISABLED: "1" });
+
+    expect(fixtureCacheIsDisabled()).toBe(false);
+  });
+
+  it("is refused to a served process even with the variable set", () => {
+    harnessPermitted({
+      NODE_ENV: "production",
+      ROAMLY_WIKIMEDIA_CACHE_DISABLED: "1",
+    });
+
+    expect(fixtureCacheIsDisabled()).toBe(false);
+  });
+
+  it("is refused when a deployment marker is present", () => {
+    harnessPermitted({ VERCEL: "1", ROAMLY_WIKIMEDIA_CACHE_DISABLED: "1" });
+
+    expect(fixtureCacheIsDisabled()).toBe(false);
+  });
+
+  it("stays on by default, and needs exactly “1” to be turned off", () => {
+    harnessPermitted();
+    expect(fixtureCacheIsDisabled()).toBe(false);
+
+    for (const value of ["true", "yes", "0", "", "01"]) {
+      harnessPermitted({ ROAMLY_WIKIMEDIA_CACHE_DISABLED: value });
+      expect(fixtureCacheIsDisabled(), value).toBe(false);
     }
   });
 });

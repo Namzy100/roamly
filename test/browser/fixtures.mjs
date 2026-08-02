@@ -314,7 +314,30 @@ export async function startNominatim() {
 const LANDMARK_TAGGED_ELEMENT_IDS = new Set([2002]);
 const LANDMARK_TAGS = { name: "Eiffel Tower", wikidata: "Q243" };
 
-export async function startOverpass({ omit = [], landmark = false } = {}) {
+/**
+ * Extra landmark-eligible places, appended to the pool rather than to the itinerary.
+ *
+ * The call-ceiling scenario needs more eligible places than three calls can answer, and the itinerary holds three. The
+ * enrichment candidate list is itinerary-first *and then the pool*, so adding viewpoints here raises the candidate count
+ * without changing a single card — which keeps every other scenario's assertions about the itinerary true.
+ *
+ * Viewpoints because the category is eligible and carries no `wikidata` tag, so each one costs exactly one nearby
+ * lookup: a predictable unit of budget, which is what makes "one place per call" a reliable thing to arrange.
+ */
+function extraLandmarkElements(count) {
+  return Array.from({ length: count }, (_, index) =>
+    el(9001 + index, 38.71 + index * 0.002, -9.14 - index * 0.002, {
+      name: `Miradouro ${index + 1}`,
+      tourism: "viewpoint",
+    }),
+  );
+}
+
+export async function startOverpass({
+  omit = [],
+  landmark = false,
+  extraLandmarks = 0,
+} = {}) {
   /**
    * `exclude` and `rename` are how a *second* search can differ from the first.
    *
@@ -344,7 +367,12 @@ export async function startOverpass({ omit = [], landmark = false } = {}) {
         }
       }
 
-      const elements = ELEMENTS.filter(
+      const catalogue =
+        extraLandmarks > 0
+          ? [...ELEMENTS, ...extraLandmarkElements(extraLandmarks)]
+          : ELEMENTS;
+
+      const elements = catalogue.filter(
         (element) =>
           !state.exclude.has(element.id) &&
           Object.entries(element.tags).some((entry) =>
@@ -540,7 +568,27 @@ export async function startWikimedia({
   delayMs = 0,
   allowFixtureUrls = true,
 } = {}) {
-  const state = { requests: 0, paths: [], entity: 0, commons: 0, sparql: 0 };
+  /**
+   * `delayMs` is mutable so one server can be fast and then slow.
+   *
+   * The refresh-cancellation case needs both in one run: a first lookup that completes promptly enough to leave a real
+   * sidecar behind, then a second that stays in flight long enough to be cancelled. Two servers would mean two origins,
+   * and the fixture allowance is granted to exactly one.
+   *
+   * `inFlight` and `aborted` are what let a scenario stop guessing. Clicking Cancel after a sleep proves nothing if the
+   * request had already finished; `inFlight > 0` says a request is genuinely open, and `aborted` counts the ones whose
+   * socket closed before this server had written its response — which is the disconnect an abort actually causes.
+   */
+  const state = {
+    requests: 0,
+    paths: [],
+    entity: 0,
+    commons: 0,
+    sparql: 0,
+    inFlight: 0,
+    aborted: 0,
+    delayMs,
+  };
 
   /*
    * Assigned after `listen`, and read only inside a handler — which cannot run before then. The file-page rewrite needs
@@ -552,7 +600,20 @@ export async function startWikimedia({
     state.requests += 1;
     state.paths.push(rawRequest.url ?? "");
 
-    const response = delayMs > 0 ? deferred(rawResponse, delayMs) : rawResponse;
+    /*
+     * Open now, and closed when the socket goes — whether this server answered or the client hung up first.
+     *
+     * `writableEnded` is the discriminator: false means the connection went away before a response was written, which
+     * is what a cancelled request looks like from the serving end.
+     */
+    state.inFlight += 1;
+    rawResponse.on("close", () => {
+      state.inFlight -= 1;
+      if (!rawResponse.writableEnded) state.aborted += 1;
+    });
+
+    const response =
+      state.delayMs > 0 ? deferred(rawResponse, state.delayMs) : rawResponse;
 
     /* Bodies are drained even though nothing reads them: an unread POST body stalls the socket. */
     rawRequest.on("data", () => {});

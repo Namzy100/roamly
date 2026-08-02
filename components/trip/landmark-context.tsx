@@ -3,7 +3,10 @@
 import { BookOpen } from "lucide-react";
 import { useId, useState } from "react";
 
-import type { LandmarkContextView } from "@/lib/trip/landmark-context";
+import {
+  type LandmarkContextView,
+  landmarkContextWithoutPhoto,
+} from "@/lib/trip/landmark-context";
 import { cn } from "@/lib/utils";
 
 /**
@@ -37,7 +40,7 @@ import { cn } from "@/lib/utils";
  * carrying licence terms is unreachable on touch, which for an attribution is not a polish problem.
  */
 export function LandmarkContext({
-  view,
+  view: stored,
   itemId,
 }: {
   view: LandmarkContextView;
@@ -54,8 +57,17 @@ export function LandmarkContext({
    */
   const [imageFailed, setImageFailed] = useState(false);
 
+  /**
+   * What this card actually renders, which is not always what was stored.
+   *
+   * A file that failed to load leaves with its whole credit — the source line stops naming Wikimedia Commons and the
+   * disclosure stops printing a licence, because crediting a photograph nobody can see claims a use that did not
+   * happen. Hiding the `<img>` and keeping the attribution would be the licence stated about the wrong thing.
+   */
+  const view = imageFailed ? landmarkContextWithoutPhoto(stored) : stored;
+
   const photo = view.photo;
-  const showImage = photo !== null && !imageFailed;
+  const showImage = photo !== null;
 
   return (
     <section

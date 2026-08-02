@@ -15,6 +15,7 @@ import { useTripRecord, useTripStore } from "@/lib/store/trip-store";
 import {
   describeSaveResult,
   describeWorkflowStop,
+  LANDMARK_CANCELLED_MESSAGE,
   type TripIntelligenceStatus,
   type TripIntelligenceUiState,
 } from "@/lib/trip/trip-intelligence-ui";
@@ -309,8 +310,20 @@ export function useTripIntelligence(tripId: string) {
         });
 
         if (result.stop === "aborted") {
-          /* The traveller changed their mind. Nothing is written, even though earlier calls may have answered. */
-          setState(IDLE);
+          /*
+           * The traveller changed their mind. Nothing is written, even though earlier calls may have answered.
+           *
+           * Said out loud rather than reset to `idle`. A silent reset left the panel identical to how it looked before
+           * the run started, so somebody who had just watched a progress bar for several seconds got no confirmation
+           * that stopping it had cost them nothing — and "nothing was saved" is exactly the reassurance a cancel needs
+           * to give. The progress counts go with it: they described a run whose answers were discarded, and leaving
+           * them on screen would suggest some of it survived.
+           */
+          setState({
+            ...IDLE,
+            status: "cancelled",
+            message: LANDMARK_CANCELLED_MESSAGE,
+          });
           return;
         }
 

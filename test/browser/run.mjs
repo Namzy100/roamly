@@ -5487,6 +5487,878 @@ async function scenarioLandmarkImageFailure(chrome, fixtures) {
   }
 }
 
+/**
+ * Everything a continuation or a cancellation scenario needs to observe, installed before the trip exists.
+ *
+ * ## Why the request bodies are read in the page
+ *
+ * "The second call asks only about what is still unresolved" is a claim about a POST body, and the fixture servers
+ * never see that body — it goes to Roamly's own route. Patching `fetch` records it at the only point where it exists as
+ * a value. This observes; it does not substitute. The real hook builds the request, the real route answers it, and the
+ * real workflow decides whether to continue.
+ *
+ * ## Why progress is sampled rather than read at the end
+ *
+ * The panel renders one frame at a time and the interesting ones are gone by the time a run settles. Sampling keeps
+ * every distinct frame, so a scenario can assert that `continuing` was reached and that no frame ever claimed 100%
+ * while places were outstanding — neither of which is visible in the final DOM.
+ */
+async function installLandmarkRecorders(page) {
+  await page.evaluate(`
+    window.__enrichCalls = 0;
+    window.__enrichRequests = [];
+    window.__rejections = [];
+    window.__progress = [];
+
+    window.addEventListener("unhandledrejection", (event) => {
+      window.__rejections.push(String(event.reason));
+    });
+
+    const original = window.fetch;
+    window.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : (input?.url ?? "");
+      if (url.includes("/api/place-intelligence/enrich")) {
+        window.__enrichCalls += 1;
+        try {
+          const body = JSON.parse(init.body);
+          window.__enrichRequests.push(body.places.map((place) => place.placeId));
+        } catch {
+          /* Recorded as a hole rather than dropped, so a malformed body cannot look like a call that never happened. */
+          window.__enrichRequests.push(null);
+        }
+      }
+      return original(input, init);
+    };
+
+    let previous = "";
+    window.__progressTimer = setInterval(() => {
+      const controls = document.querySelector('[data-testid="landmark-controls"]');
+      if (!controls) return;
+      const bar = controls.querySelector('[data-testid="landmark-progress"]');
+      const textOf = (testid) => {
+        const node = controls.querySelector('[data-testid="' + testid + '"]');
+        return node ? node.textContent : null;
+      };
+      const frame = {
+        status: controls.dataset.landmarkStatus ?? null,
+        percent: bar ? Number(bar.dataset.percent) : null,
+        countLine: textOf("landmark-count-line"),
+        callLine: textOf("landmark-call-line"),
+        resultLine: textOf("landmark-result-line"),
+        outcome: textOf("landmark-outcome"),
+        cancel: controls.querySelector('[data-testid="cancel-landmarks"]') !== null,
+      };
+      const key = JSON.stringify(frame);
+      if (key !== previous) {
+        previous = key;
+        window.__progress.push(frame);
+      }
+    }, 40);
+
+    return true;
+  `);
+}
+
+/** Generates a trip and waits for the landmark panel, which every landmark scenario starts by doing. */
+async function reachLandmarkPanel(page, server) {
+  await page.goto(`${server.baseUrl}/`);
+  await installLandmarkRecorders(page);
+  await submitForm(page);
+  await chooseFirstDestination(page);
+  await page.click('[data-testid="generate-with-ai"]');
+  await waitForWorkspace(page);
+  await page.waitFor(
+    `document.querySelector('[data-testid="landmark-controls"]')`,
+    { timeoutMs: 30_000, label: "the landmark panel" },
+  );
+}
+
+/**
+ * A continuation, driven by the server genuinely running out of time (Section 5).
+ *
+ * ## Nothing about the continuation is simulated
+ *
+ * `runEnrichmentWorkflow` continues on one signal only: a response carrying `abandoned.code === "budget_exhausted"`,
+ * which the enrichment run emits when its own deadline passes between two places. So the fixture does not fake a
+ * continuation — it makes each Wikimedia answer slow and tells the route to use a short budget, and the real deadline
+ * then trips for the real reason. The hook, the route and the workflow all run exactly as they ship.
+ *
+ * `ROAMLY_ENRICHMENT_BUDGET_MS` is honoured only under the isolated fixture policy: `next dev`, the harness flag, no
+ * deployment marker, and every Wikimedia endpoint pointed at this fixture. A served application never reads it.
+ *
+ * ## Why the numbers are what they are
+ *
+ * Each place costs roughly two Wikimedia round trips, so a 250 ms delay makes a place take about half a second, and a
+ * 900 ms budget lets one or two through before the deadline is noticed at the top of the loop. That leaves places
+ * outstanding with progress made, which is precisely the state that earns a second call.
+ */
+async function scenarioLandmarkContinuation(chrome, fixtures) {
+  currentScenario = "A lookup that continues after running out of time";
+  console.log(`\n▸ ${currentScenario}`);
+
+  const gemini = await startGemini({ mode: "ok" });
+  const overpass = await startOverpass({ landmark: true });
+  const wikimedia = await startWikimedia({ mode: "accepted", delayMs: 250 });
+  const server = await startNextServer({
+    ROAMLY_NOMINATIM_BASE_URL: fixtures.nominatim.baseUrl,
+    ROAMLY_OVERPASS_BASE_URL: overpass.baseUrl,
+    ROAMLY_VALHALLA_BASE_URL: fixtures.valhalla.baseUrl,
+    GEMINI_API_KEY: "fixture-key",
+    GEMINI_BASE_URL: gemini.baseUrl,
+    GEMINI_MODEL: "gemini-fixture",
+    ROAMLY_ENRICHMENT_BUDGET_MS: "650",
+    ...wikimedia.env,
+    ...wikimedia.publicEnv,
+  });
+  const page = await openPage(chrome.port, "about:blank");
+
+  try {
+    await page.send("Network.setBlockedURLs", {
+      urls: ["*wikidata.org*", "*wikipedia.org*", "*wikimedia.org*"],
+    });
+    await reachLandmarkPanel(page, server);
+
+    const tripId = Object.keys(await readStore(page))[0];
+    const before = (await readStore(page))[tripId];
+    const planBefore = await page.evaluate(`
+      const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+      return JSON.stringify({
+        plan: record.plan,
+        routes: record.routes ?? null,
+        generation: record.generation ?? null,
+        history: { past: record.history.past.length, future: record.history.future.length },
+      });
+    `);
+
+    await expect("nothing is requested until the traveller asks", async () => {
+      await page.sleep(1200);
+      const calls = await page.evaluate(`return window.__enrichCalls;`);
+      return calls === 0 ? true : `${calls} request(s)`;
+    });
+
+    await expect("an explicit action runs the lookup to a settled state", async () => {
+      await page.click('[data-testid="run-landmarks"]');
+      await page.waitFor(
+        `["complete","partial","empty","failed","conflict"].includes(
+           document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus
+         )`,
+        { timeoutMs: 90_000, label: "the lookup to settle" },
+      );
+      return true;
+    });
+
+    /* Everything below reads recordings, so the run is over and the numbers cannot move under the assertions. */
+    const requests = await page.evaluate(`return window.__enrichRequests;`);
+    const frames = await page.evaluate(`return window.__progress;`);
+
+    await expect("the server ran out of time and a second call went out", () =>
+      requests.length >= 2
+        ? true
+        : `${requests.length} call(s) — the budget did not force a continuation`,
+    );
+
+    await expect("the panel reported the continuation as a phase", () => {
+      const phases = frames.map((frame) => frame.status);
+      if (!phases.includes("checking")) return `no checking phase: ${phases.join(",")}`;
+      return phases.includes("continuing")
+        ? true
+        : `never continued: ${phases.join(",")}`;
+    });
+
+    /**
+     * The heart of Section 5: a continuation carries only what is still unknown.
+     *
+     * Re-asking about an answered place would spend a volunteer service's time to learn something Roamly already knows,
+     * and the workflow's first-answer-wins rule means the repeat could not even change the result.
+     */
+    await expect("the second call asks only about unresolved places", () => {
+      const [first, second] = requests;
+      if (!Array.isArray(first) || !Array.isArray(second)) {
+        return "a request body was unreadable";
+      }
+      if (second.length >= first.length) {
+        return `call 2 asked about ${second.length} of ${first.length}`;
+      }
+      const extra = second.filter((id) => !first.includes(id));
+      return extra.length === 0 ? true : `call 2 introduced ${extra.length} new place(s)`;
+    });
+
+    await expect("no place answered in call one is asked about again", () => {
+      const [first, second] = requests;
+      const answered = first.filter((id) => !second.includes(id));
+      if (answered.length === 0) return "call 1 answered nothing, so this proves nothing";
+      const repeated = second.filter((id) => answered.includes(id));
+      return repeated.length === 0 ? true : `${repeated.length} repeated`;
+    });
+
+    /** The itinerary's order is the order a traveller reads, and a continuation must not reshuffle it. */
+    await expect("the original candidate order is preserved", () => {
+      const [first, second] = requests;
+      const expectedOrder = first.filter((id) => second.includes(id));
+      return JSON.stringify(second) === JSON.stringify(expectedOrder)
+        ? true
+        : `${second.join(",")} against ${expectedOrder.join(",")}`;
+    });
+
+    /* -- the numbers a traveller reads --------------------------------------- */
+
+    await expect("the total never moves across the whole run", () => {
+      const totals = new Set(
+        frames
+          .map((frame) => frame.countLine)
+          .filter(Boolean)
+          .map((line) => line.replace(/^\d+ of /, "")),
+      );
+      return totals.size === 1 ? true : [...totals].join(" | ");
+    });
+
+    await expect("the checked count only ever rises", () => {
+      const checked = frames
+        .map((frame) => frame.countLine)
+        .filter(Boolean)
+        .map((line) => Number(line.split(" ")[0]));
+      for (let index = 1; index < checked.length; index += 1) {
+        if (checked[index] < checked[index - 1]) {
+          return `${checked[index - 1]} then ${checked[index]}`;
+        }
+      }
+      return checked.length > 0 ? true : "no counts were rendered";
+    });
+
+    /**
+     * The bar cannot claim a finished trip while places are outstanding.
+     *
+     * `honestPercent` caps at 99 whenever anything is unresolved, and the bar is the fastest-read element in the panel —
+     * a full bar over an incomplete lookup is the most misleading thing this feature could render.
+     */
+    await expect("no frame claims 100% while anything is unresolved", () => {
+      for (const frame of frames) {
+        if (frame.percent === null || frame.resultLine === null) continue;
+        const unresolved = /(\d+) still to reach/.exec(frame.resultLine);
+        if (unresolved && Number(unresolved[1]) > 0 && frame.percent >= 100) {
+          return `${frame.percent}% with ${unresolved[1]} unresolved`;
+        }
+      }
+      return true;
+    });
+
+    await expect("the completed-call count is accurate and bounded", () => {
+      const lines = frames.map((frame) => frame.callLine).filter(Boolean);
+      if (lines.length === 0) return "no call line was rendered";
+
+      const counts = lines.map((line) => Number(line.split(" ")[0]));
+      const maxima = new Set(lines.map((line) => line.split(" ")[2]));
+      if (maxima.size !== 1) return `maximum changed: ${[...maxima].join(",")}`;
+      if ([...maxima][0] !== "3") return `maximum is ${[...maxima][0]}`;
+
+      const highest = Math.max(...counts);
+      if (highest !== requests.length) {
+        return `reported ${highest} completed, ${requests.length} were made`;
+      }
+      return counts.every((count) => count <= 3) ? true : counts.join(",");
+    });
+
+    await expect("the panel says requests completed, not requests started", () =>
+      frames.some((frame) => (frame.callLine ?? "").includes("requests completed"))
+        ? true
+        : "the call line does not say completed",
+    );
+
+    /* -- one action, one write ------------------------------------------------ */
+
+    await expect("two calls still produce exactly one revision", async () => {
+      const after = (await readStore(page))[tripId];
+      return after.revision === before.revision + 1
+        ? true
+        : `${before.revision} → ${after.revision} across ${requests.length} calls`;
+    });
+
+    await expect("the plan, routes and generation context are untouched", () =>
+      page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        const now = JSON.stringify({
+          plan: record.plan,
+          routes: record.routes ?? null,
+          generation: record.generation ?? null,
+          history: { past: record.history.past.length, future: record.history.future.length },
+        });
+        return now === ${JSON.stringify(planBefore)} ? true : "something outside the sidecar changed";
+      `),
+    );
+
+    await expect("a landmark lookup creates no undo entry", async () => {
+      const after = (await readStore(page))[tripId];
+      return after.history.past.length === before.history.past.length
+        ? true
+        : `${before.history.past.length} → ${after.history.past.length}`;
+    });
+
+    /* -- the copy -------------------------------------------------------------- */
+
+    await expect("the final copy agrees with what was actually stored", () =>
+      page.evaluate(`
+        const result = document.querySelector('[data-testid="landmark-result-line"]');
+        if (!result) return "no result line";
+
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        const entries = Object.values(record.intelligence?.byCanonicalPlaceId ?? {});
+        const claimed = /^(\\d+) place/.exec(result.textContent);
+        if (!claimed) return "unreadable result line: " + result.textContent;
+
+        return Number(claimed[1]) === entries.length
+          ? true
+          : result.textContent + " against " + entries.length + " stored";
+      `),
+    );
+
+    await expect("no internal stop code, provider host or status reached the page", () =>
+      page.evaluate(`
+        const text = document.querySelector('[data-testid="landmark-controls"]').textContent;
+        for (const leak of [
+          "budget_exhausted", "call-limit", "no-progress", "provider-stopped",
+          "wikidata.org", "wikimedia.org", "127.0.0.1", "localhost",
+          "http_", "AbortError", "fetch",
+        ]) {
+          if (text.includes(leak)) return "leaked " + leak;
+        }
+        return true;
+      `),
+    );
+
+    await expect("no unhandled rejection and no React exception", async () => {
+      const rejections = await page.evaluate(`return window.__rejections;`);
+      if (rejections.length > 0) return rejections.join(" | ");
+      return page.pageErrors.length === 0 ? true : page.pageErrors.join(" | ");
+    });
+
+    await expect("no console errors or hydration warnings were logged", () => {
+      const problems = consoleProblems(page);
+      return problems.length === 0 ? true : problems.join(" | ");
+    });
+  } finally {
+    await page.close();
+    await server.close();
+    await closeAll([gemini, overpass, wikimedia]);
+  }
+}
+
+/**
+ * The three-call ceiling, reached with places still unanswered (Section 5, second case).
+ *
+ * A separate scenario rather than more assertions on the one above, because the two need opposite budgets: the happy
+ * continuation needs one generous enough to finish on the second call, and this needs one mean enough that three calls
+ * are not sufficient. Folding them together would mean a budget that satisfies neither cleanly.
+ *
+ * What matters here is the honesty of the ending. A run that spent its whole allowance and still does not know about a
+ * place must not present as a completed one.
+ */
+async function scenarioLandmarkCallLimit(chrome, fixtures) {
+  currentScenario = "A lookup that reaches its call ceiling";
+  console.log(`\n▸ ${currentScenario}`);
+
+  const gemini = await startGemini({ mode: "ok" });
+  const overpass = await startOverpass({ landmark: true, extraLandmarks: 3 });
+  const wikimedia = await startWikimedia({ mode: "accepted", delayMs: 300 });
+  const server = await startNextServer({
+    ROAMLY_NOMINATIM_BASE_URL: fixtures.nominatim.baseUrl,
+    ROAMLY_OVERPASS_BASE_URL: overpass.baseUrl,
+    ROAMLY_VALHALLA_BASE_URL: fixtures.valhalla.baseUrl,
+    GEMINI_API_KEY: "fixture-key",
+    GEMINI_BASE_URL: gemini.baseUrl,
+    GEMINI_MODEL: "gemini-fixture",
+    /* Barely enough for one place, so every call is abandoned with work left. */
+    ROAMLY_ENRICHMENT_BUDGET_MS: "450",
+    ...wikimedia.env,
+    ...wikimedia.publicEnv,
+  });
+  const page = await openPage(chrome.port, "about:blank");
+
+  try {
+    await page.send("Network.setBlockedURLs", {
+      urls: ["*wikidata.org*", "*wikipedia.org*", "*wikimedia.org*"],
+    });
+    await reachLandmarkPanel(page, server);
+
+    const tripId = Object.keys(await readStore(page))[0];
+    const revisionBefore = (await readStore(page))[tripId].revision;
+
+    await page.click('[data-testid="run-landmarks"]');
+    await page.waitFor(
+      `["complete","partial","empty","failed","conflict"].includes(
+         document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus
+       )`,
+      { timeoutMs: 120_000, label: "the capped lookup to settle" },
+    );
+
+    const requests = await page.evaluate(`return window.__enrichRequests;`);
+    const frames = await page.evaluate(`return window.__progress;`);
+
+    await expect("the run stops at three calls and no more", () =>
+      requests.length === 3 ? true : `${requests.length} call(s)`,
+    );
+
+    await expect("every call asked about fewer places than the last", () => {
+      const sizes = requests.map((call) => (call ?? []).length);
+      for (let index = 1; index < sizes.length; index += 1) {
+        if (sizes[index] >= sizes[index - 1]) return sizes.join(" → ");
+      }
+      return true;
+    });
+
+    await expect("places were still outstanding when the ceiling was hit", () => {
+      const last = requests[requests.length - 1] ?? [];
+      return last.length > 1
+        ? true
+        : "the last call asked about one place, so nothing was left over";
+    });
+
+    /** A capped run is not a finished one, and the copy is the only place that distinction reaches a traveller. */
+    await expect("the outcome does not claim the trip was completed", () =>
+      page.evaluate(`
+        const controls = document.querySelector('[data-testid="landmark-controls"]');
+        if (controls.dataset.landmarkStatus === "complete") {
+          return "settled as complete with places unreached";
+        }
+
+        const outcome = controls.querySelector('[data-testid="landmark-outcome"]');
+        if (!outcome) return "no outcome message";
+        const text = outcome.textContent.toLowerCase();
+        for (const overclaim of ["all places", "every place", "finished checking"]) {
+          if (text.includes(overclaim)) return "overclaims: " + outcome.textContent;
+        }
+        return true;
+      `),
+    );
+
+    await expect("the bar never reaches 100% on a capped run", () => {
+      const claimed = frames.filter((frame) => (frame.percent ?? 0) >= 100);
+      return claimed.length === 0 ? true : `${claimed.length} frame(s) at 100%`;
+    });
+
+    await expect("the panel reports three of three requests completed", () =>
+      frames.some((frame) => (frame.callLine ?? "").startsWith("3 of 3"))
+        ? true
+        : frames.map((frame) => frame.callLine).filter(Boolean).join(" | "),
+    );
+
+    await expect("the unresolved count survives into the settled copy", () =>
+      page.evaluate(`
+        const result = document.querySelector('[data-testid="landmark-result-line"]');
+        if (!result) return "no result line";
+        return /still to reach/.test(result.textContent)
+          ? true
+          : "the unresolved places are not mentioned: " + result.textContent;
+      `),
+    );
+
+    /**
+     * Three calls, at most one write — and none at all when there was nothing worth writing.
+     *
+     * Not a flat `+1`. This budget is mean enough that the places reached are the ones the nearby search cannot
+     * identify, so they settle as `unmatched` — a real answer that carries no sidecar. `persistableEntries` then offers
+     * nothing and the guarded save is correctly skipped, which is the behaviour worth pinning: a run that wrote a
+     * revision to record "we learned nothing" would be churning the store for no reader's benefit.
+     */
+    await expect("three calls produce one write, or none if nothing was found", async () => {
+      const after = (await readStore(page))[tripId];
+      const delta = after.revision - revisionBefore;
+      if (delta > 1) return `the revision moved ${delta} times across three calls`;
+
+      const stored = Object.keys(
+        after.intelligence?.byCanonicalPlaceId ?? {},
+      ).length;
+      return delta === (stored > 0 ? 1 : 0)
+        ? true
+        : `revision delta ${delta} with ${stored} stored entries`;
+    });
+
+    await expect("and the capped run creates no undo entry", async () => {
+      const after = (await readStore(page))[tripId];
+      return after.history.past.length === 0
+        ? true
+        : `${after.history.past.length} history entries`;
+    });
+
+    await expect("no internal stop code reached the page", () =>
+      page.evaluate(`
+        const text = document.querySelector('[data-testid="landmark-controls"]').textContent;
+        for (const leak of ["call-limit", "budget_exhausted", "no-progress", "http_"]) {
+          if (text.includes(leak)) return "leaked " + leak;
+        }
+        return true;
+      `),
+    );
+
+    await expect("no console errors or hydration warnings were logged", () => {
+      const problems = consoleProblems(page);
+      return problems.length === 0 ? true : problems.join(" | ");
+    });
+  } finally {
+    await page.close();
+    await server.close();
+    await closeAll([gemini, overpass, wikimedia]);
+  }
+}
+
+/**
+ * Blocks until the fixture has a request genuinely open, rather than until a sleep expires.
+ *
+ * Cancelling after a fixed pause proves nothing: if the request had already finished, the click lands on a button that
+ * is no longer there and the scenario passes for the wrong reason. `inFlight` is incremented when a request arrives and
+ * decremented when its socket closes, so a positive value means there is really something to abort.
+ */
+async function waitForFixtureRequest(page, wikimedia, { timeoutMs = 30_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (wikimedia.state.inFlight > 0) return true;
+    await page.sleep(50);
+  }
+  throw new Error("Timed out waiting for a fixture request to be in flight");
+}
+
+/** The assertions both cancellation scenarios share: the copy, the controls, and the absence of noise. */
+async function assertCancelledCleanly(page, wikimedia, expected) {
+  await expect("the panel settles as cancelled, not as a failure", () =>
+    page.evaluate(`
+      const controls = document.querySelector('[data-testid="landmark-controls"]');
+      const status = controls.dataset.landmarkStatus;
+      if (status !== "cancelled") return "settled as " + status;
+      const outcome = controls.querySelector('[data-testid="landmark-outcome"]');
+      if (!outcome) return "no outcome message";
+      return outcome.dataset.tone === "problem" ? "shown as a problem" : true;
+    `),
+  );
+
+  await expect("the copy says nothing was saved and the trip is unchanged", () =>
+    page.evaluate(`
+      const outcome = document.querySelector('[data-testid="landmark-outcome"]').textContent;
+      if (!outcome.includes("Nothing was saved")) return outcome;
+      return outcome.includes("unchanged") ? true : outcome;
+    `),
+  );
+
+  /** A cancellation is the one failure-shaped outcome most likely to leak a transport detail. */
+  await expect("no AbortError, stack trace or internal code reaches the page", () =>
+    page.evaluate(`
+      const text = document.querySelector('[data-testid="landmark-controls"]').textContent;
+      for (const leak of [
+        "AbortError", "DOMException", "aborted", "signal", "stack", "at async",
+        "budget_exhausted", "call-limit", "no-progress", "http_",
+        "127.0.0.1", "localhost", "wikimedia.org", "wikidata.org",
+      ]) {
+        if (text.includes(leak)) return "leaked " + leak;
+      }
+      return true;
+    `),
+  );
+
+  await expect("Cancel is gone and the action can be started again", () =>
+    page.evaluate(`
+      const controls = document.querySelector('[data-testid="landmark-controls"]');
+      if (controls.querySelector('[data-testid="cancel-landmarks"]')) {
+        return "Cancel is still offered";
+      }
+      const run = controls.querySelector('[data-testid="run-landmarks"]');
+      if (!run) return "the primary action is gone";
+      if (run.disabled) return "the primary action is disabled";
+      return run.dataset.action === ${JSON.stringify(expected.action)}
+        ? true
+        : "primary is " + run.dataset.action;
+    `),
+  );
+
+  await expect("no progress bar is left behind", () =>
+    page.check(
+      `document.querySelector('[data-testid="landmark-progress"]') === null`,
+    ),
+  );
+
+  await expect("no second request began after the cancellation", async () => {
+    const before = wikimedia.state.requests;
+    await page.sleep(2000);
+    const calls = await page.evaluate(`return window.__enrichCalls;`);
+    if (calls !== expected.enrichCalls) {
+      return `${calls} enrich call(s), expected ${expected.enrichCalls}`;
+    }
+    return wikimedia.state.requests === before
+      ? true
+      : `${wikimedia.state.requests - before} further provider request(s)`;
+  });
+
+  await expect("the fixture saw the open connection drop", () =>
+    wikimedia.state.aborted > 0
+      ? true
+      : "no request was observed to disconnect, so the transport may not have been aborted",
+  );
+
+  await expect("no unhandled rejection and no React exception", async () => {
+    const rejections = await page.evaluate(`return window.__rejections;`);
+    if (rejections.length > 0) return rejections.join(" | ");
+    return page.pageErrors.length === 0 ? true : page.pageErrors.join(" | ");
+  });
+
+  await expect("no console errors or hydration warnings were logged", () => {
+    const problems = consoleProblems(page);
+    return problems.length === 0 ? true : problems.join(" | ");
+  });
+}
+
+/**
+ * Cancelling a first lookup, on a trip that has no landmark context yet (Section 6, case 1).
+ *
+ * The delay is what makes this observable at all: with a prompt fixture the whole run finishes before a click could
+ * land, so the button under test would never be on screen. Four seconds per Wikimedia answer keeps the first call open
+ * for long enough that the scenario can wait for a *real* in-flight request rather than for a timer.
+ *
+ * The budget is deliberately left at the shipped 90 s. A short one would risk the run abandoning itself, and an outcome
+ * that might be either a cancellation or a budget stop is not evidence of either.
+ */
+async function scenarioLandmarkCancelInitial(chrome, fixtures) {
+  currentScenario = "Cancelling a first landmark lookup";
+  console.log(`\n▸ ${currentScenario}`);
+
+  const gemini = await startGemini({ mode: "ok" });
+  const overpass = await startOverpass({ landmark: true });
+  const wikimedia = await startWikimedia({ mode: "accepted", delayMs: 4000 });
+  const server = await startNextServer({
+    ROAMLY_NOMINATIM_BASE_URL: fixtures.nominatim.baseUrl,
+    ROAMLY_OVERPASS_BASE_URL: overpass.baseUrl,
+    ROAMLY_VALHALLA_BASE_URL: fixtures.valhalla.baseUrl,
+    GEMINI_API_KEY: "fixture-key",
+    GEMINI_BASE_URL: gemini.baseUrl,
+    GEMINI_MODEL: "gemini-fixture",
+    ...wikimedia.env,
+    ...wikimedia.publicEnv,
+  });
+  const page = await openPage(chrome.port, "about:blank");
+
+  try {
+    await page.send("Network.setBlockedURLs", {
+      urls: ["*wikidata.org*", "*wikipedia.org*", "*wikimedia.org*"],
+    });
+    await reachLandmarkPanel(page, server);
+
+    const tripId = Object.keys(await readStore(page))[0];
+    const before = (await readStore(page))[tripId];
+
+    await expect("Cancel is not offered before anything is running", () =>
+      page.check(
+        `document.querySelector('[data-testid="cancel-landmarks"]') === null`,
+      ),
+    );
+
+    await expect("Cancel appears once a lookup is actually in flight", async () => {
+      await page.click('[data-testid="run-landmarks"]');
+      await waitForFixtureRequest(page, wikimedia);
+      await page.waitFor(
+        `document.querySelector('[data-testid="cancel-landmarks"]') !== null`,
+        { timeoutMs: 20_000, label: "the Cancel control" },
+      );
+      return page.check(
+        `["checking","continuing"].includes(
+           document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus
+         )`,
+      );
+    });
+
+    /**
+     * Cancelled from the keyboard, through the browser's own input pipeline.
+     *
+     * A dispatched click would prove the handler works; pressing Enter on a focused control proves a keyboard user can
+     * reach the only escape route this feature offers, which is the property that matters for a stop button.
+     */
+    await expect("Cancel is keyboard reachable and stops the run", async () => {
+      const focused = await page.focus('[data-testid="cancel-landmarks"]');
+      if (!focused) return "Cancel did not take focus";
+
+      await page.press("Enter");
+      await page.waitFor(
+        `document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus === "cancelled"`,
+        { timeoutMs: 20_000, label: "the run to stop" },
+      );
+      return true;
+    });
+
+    await assertCancelledCleanly(page, wikimedia, {
+      action: "enrich",
+      enrichCalls: 1,
+    });
+
+    /* -- nothing was written -------------------------------------------------- */
+
+    await expect("no landmark context appeared on the trip", async () => {
+      const after = (await readStore(page))[tripId];
+      return after.intelligence == null
+        ? true
+        : "a sidecar was written for a cancelled run";
+    });
+
+    await expect("the revision and the undo history are untouched", async () => {
+      const after = (await readStore(page))[tripId];
+      if (after.revision !== before.revision) {
+        return `${before.revision} → ${after.revision}`;
+      }
+      return after.history.past.length === before.history.past.length
+        ? true
+        : "the undo history changed";
+    });
+
+    await expect("no card gained a landmark region", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-context"]') === null`,
+      ),
+    );
+  } finally {
+    await page.close();
+    await server.close();
+    await closeAll([gemini, overpass, wikimedia]);
+  }
+}
+
+/**
+ * Cancelling a refresh, on a trip that already holds landmark context (Section 6, case 2).
+ *
+ * The dangerous case. A cancelled *first* lookup has nothing to damage; a cancelled *refresh* runs against a trip whose
+ * sidecar a traveller can already see, and the failure worth ruling out is a half-applied replacement — the old context
+ * cleared before the new one arrived, or merged with whatever the abandoned run happened to have collected.
+ *
+ * So the sidecar is compared byte for byte across the cancellation rather than merely checked for existence. One server
+ * serves both halves, fast and then slow, because the fixture allowance is granted to exactly one origin.
+ */
+async function scenarioLandmarkCancelRefresh(chrome, fixtures) {
+  currentScenario = "Cancelling a refresh keeps the existing context";
+  console.log(`\n▸ ${currentScenario}`);
+
+  const gemini = await startGemini({ mode: "ok" });
+  const overpass = await startOverpass({ landmark: true });
+  /* Prompt to begin with: the first lookup has to finish and leave something real behind. */
+  const wikimedia = await startWikimedia({ mode: "accepted" });
+  const server = await startNextServer({
+    ROAMLY_NOMINATIM_BASE_URL: fixtures.nominatim.baseUrl,
+    ROAMLY_OVERPASS_BASE_URL: overpass.baseUrl,
+    ROAMLY_VALHALLA_BASE_URL: fixtures.valhalla.baseUrl,
+    GEMINI_API_KEY: "fixture-key",
+    GEMINI_BASE_URL: gemini.baseUrl,
+    GEMINI_MODEL: "gemini-fixture",
+    /* Every lookup is a real one, so a refresh of an already-enriched trip is genuinely in flight to cancel. */
+    ROAMLY_WIKIMEDIA_CACHE_DISABLED: "1",
+    ...wikimedia.env,
+    ...wikimedia.publicEnv,
+  });
+  const page = await openPage(chrome.port, "about:blank");
+
+  try {
+    await page.send("Network.setBlockedURLs", {
+      urls: ["*wikidata.org*", "*wikipedia.org*", "*wikimedia.org*"],
+    });
+    await reachLandmarkPanel(page, server);
+
+    const tripId = Object.keys(await readStore(page))[0];
+
+    await expect("a first lookup saves real context to refresh against", async () => {
+      await page.click('[data-testid="run-landmarks"]');
+      await page.waitFor(
+        `["complete","partial","empty","failed","conflict"].includes(
+           document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus
+         )`,
+        { timeoutMs: 60_000, label: "the first lookup to settle" },
+      );
+      const store = await readStore(page);
+      const sidecar = store[tripId].intelligence;
+      return sidecar && Object.keys(sidecar.byCanonicalPlaceId ?? {}).length > 0
+        ? true
+        : "nothing was saved, so there is nothing to protect";
+    });
+
+    /** The exact bytes to compare against. Serialised once, before anything can disturb them. */
+    const sidecarBefore = await page.evaluate(`
+      const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+      return JSON.stringify(record.intelligence);
+    `);
+    const before = (await readStore(page))[tripId];
+    const enrichCallsBefore = await page.evaluate(`return window.__enrichCalls;`);
+
+    await expect("the panel now offers a refresh", () =>
+      page.check(
+        `document.querySelector('[data-testid="run-landmarks"]').dataset.action === "refresh"`,
+      ),
+    );
+
+    /* Slow from here, so the refresh can be caught in flight. Same server, same origin, same allowance. */
+    wikimedia.state.delayMs = 4000;
+    wikimedia.state.aborted = 0;
+
+    await expect("Cancel appears while the refresh is in flight", async () => {
+      await page.click('[data-testid="run-landmarks"]');
+      await waitForFixtureRequest(page, wikimedia);
+      await page.waitFor(
+        `document.querySelector('[data-testid="cancel-landmarks"]') !== null`,
+        { timeoutMs: 20_000, label: "the Cancel control" },
+      );
+      return true;
+    });
+
+    /** Mid-refresh, the old context is still on the cards — it is not cleared in anticipation of a replacement. */
+    await expect("the existing context stays on screen during the refresh", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-context"]') !== null`,
+      ),
+    );
+
+    await expect("cancelling the refresh stops it", async () => {
+      await page.click('[data-testid="cancel-landmarks"]');
+      await page.waitFor(
+        `document.querySelector('[data-testid="landmark-controls"]').dataset.landmarkStatus === "cancelled"`,
+        { timeoutMs: 20_000, label: "the refresh to stop" },
+      );
+      return true;
+    });
+
+    await assertCancelledCleanly(page, wikimedia, {
+      action: "refresh",
+      enrichCalls: enrichCallsBefore + 1,
+    });
+
+    /* -- the promise that matters --------------------------------------------- */
+
+    await expect("the existing sidecar is byte-for-byte what it was", () =>
+      page.evaluate(`
+        const record = Object.values(window.__roamlyTripStore.getState().records)[0];
+        return JSON.stringify(record.intelligence) === ${JSON.stringify(sidecarBefore)}
+          ? true
+          : "the stored context changed";
+      `),
+    );
+
+    await expect("the revision and the undo history did not move", async () => {
+      const after = (await readStore(page))[tripId];
+      if (after.revision !== before.revision) {
+        return `${before.revision} → ${after.revision}`;
+      }
+      return after.history.past.length === before.history.past.length
+        ? true
+        : "the undo history changed";
+    });
+
+    await expect("the cards still render the context they had", () =>
+      page.check(
+        `document.querySelector('[data-testid="landmark-context"]') !== null`,
+      ),
+    );
+
+    /** There is still something to forget, so the control that forgets it must still be offered. */
+    await expect("Clear is still available after the cancelled refresh", () =>
+      page.check(
+        `document.querySelector('[data-testid="clear-landmarks"]') !== null`,
+      ),
+    );
+  } finally {
+    await page.close();
+    await server.close();
+    await closeAll([gemini, overpass, wikimedia]);
+  }
+}
+
 async function main() {
   const chrome = await launchChrome();
   console.log(`Chrome: ${chrome.version["User-Agent"]}`);
@@ -5588,6 +6460,10 @@ async function main() {
     await scenarioLandmarkContext(chrome, fixtures);
     await scenarioEnrichedLandmark(chrome, fixtures);
     await scenarioLandmarkImageFailure(chrome, fixtures);
+    await scenarioLandmarkContinuation(chrome, fixtures);
+    await scenarioLandmarkCallLimit(chrome, fixtures);
+    await scenarioLandmarkCancelInitial(chrome, fixtures);
+    await scenarioLandmarkCancelRefresh(chrome, fixtures);
     await scenarioRefinementRefused(chrome, fixtures);
   } finally {
     await closeAll([nominatim, overpass, valhalla, gemini]);

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { mayCache, type ProviderId } from "@/lib/place-intelligence";
+import { fixtureCacheIsDisabled } from "@/lib/place-intelligence/fixture-origin";
 import {
   cacheKey as sharedCacheKey,
   createMemoryCache,
@@ -123,6 +124,15 @@ export function readCache<T>(
   namespace: WikimediaCacheNamespace,
   parts: Record<string, unknown>,
 ): T | undefined {
+  /*
+   * The browser harness may ask for every lookup to be a real one.
+   *
+   * A refresh of a trip already enriched is otherwise answered from memory and issues no request, which leaves the
+   * cancellation path with nothing in flight to cancel. Reads only: writes still happen, so the cache behaves normally
+   * in every other respect. Gated by the isolated fixture policy, so a served process never reaches the variable.
+   */
+  if (fixtureCacheIsDisabled()) return undefined;
+
   return cache.get<T>(wikimediaCacheKey(namespace, parts));
 }
 

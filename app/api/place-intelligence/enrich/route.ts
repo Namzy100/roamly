@@ -15,6 +15,7 @@ import {
   landmarkEligibility,
   MAX_LANDMARK_CANDIDATES_PER_TRIP,
 } from "@/lib/place-intelligence";
+import { fixtureEnrichmentBudgetMs } from "@/lib/place-intelligence/fixture-origin";
 import { logOperation } from "@/lib/providers/log";
 import {
   enrichPlaces,
@@ -119,7 +120,15 @@ export async function POST(request: Request): Promise<Response> {
       places: eligible,
       requestId,
       signal: request.signal,
-      budgetMs: ENRICHMENT_BUDGET_MS,
+      /*
+       * The real budget, unless the isolated fixture policy is in force.
+       *
+       * `fixtureEnrichmentBudgetMs` returns `null` for every served process — it fails on `NODE_ENV` long before it
+       * looks at a variable — so this reads as `ENRICHMENT_BUDGET_MS` in production by construction rather than by
+       * configuration. It exists because a continuation is only reachable when the server genuinely runs out of time,
+       * and 90 s against a 120 s route ceiling leaves no room to demonstrate one.
+       */
+      budgetMs: fixtureEnrichmentBudgetMs() ?? ENRICHMENT_BUDGET_MS,
     });
 
     return respond({

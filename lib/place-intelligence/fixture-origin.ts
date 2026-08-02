@@ -277,6 +277,80 @@ function fixtureOrigin(): string | null {
 }
 
 /**
+ * The upper bound on a fixture-shortened enrichment budget.
+ *
+ * Thirty seconds is far below the real 90 s and far above anything a fixture needs, so the override can only ever make
+ * the server *stricter* than production. A value above this is a configuration mistake rather than an intention, and
+ * silently clamping one would hide it — so it is refused and the real budget stands.
+ */
+const MAX_FIXTURE_BUDGET_MS = 30_000;
+
+/**
+ * A shortened enrichment budget, when the isolated fixture policy is in force. `null` everywhere else.
+ *
+ * ## Why the harness needs this at all
+ *
+ * `runEnrichmentWorkflow` continues on exactly one signal: a response carrying `abandoned.code === "budget_exhausted"`.
+ * That code has a single producer — the enrichment run's own deadline — so the *only* honest way to exercise a
+ * continuation end to end is to let the server genuinely run out of time. With the real 90 s budget that is
+ * unreachable: the route declares `maxDuration = 120`, so a first call long enough to exhaust it cannot complete.
+ *
+ * The alternative was to fake the continuation in the hook or in the page, which would leave the branch that actually
+ * ships untested — a continuation that works in the harness and not in production is worse than no test.
+ *
+ * ## Why it cannot lower the real budget
+ *
+ * It reuses `serverFixtureOrigin()` unchanged, so every condition that guards an HTTP media URL guards this too: a
+ * unit-test process that opted in, or `next dev` started by the browser suite with `ROAMLY_BROWSER_FIXTURE_RUN`,
+ * `NODE_ENV === "development"`, no deployment marker, and every Wikimedia endpoint redirected onto one loopback origin.
+ * A served application fails at `NODE_ENV` before reaching the variable, and the variable is private, so no bundle and
+ * no page can set it.
+ *
+ * Deliberately not a boolean plus a separate read: a caller holding "am I in fixture mode?" would be a second copy of
+ * this policy, and the copy that drifts is the one that stops checking a condition.
+ */
+export function fixtureEnrichmentBudgetMs(): number | null {
+  if (serverFixtureOrigin() === null) return null;
+
+  const configured = process.env.ROAMLY_ENRICHMENT_BUDGET_MS;
+  if (!configured) return null;
+
+  /*
+   * A strict integer. `Number()` would accept `"1e3"`, `" 500 "` and `""`, and a budget arriving from a typo as `NaN`
+   * or `0` would abandon the run before its first place — which reads as a broken feature rather than a bad value.
+   */
+  if (!/^[1-9][0-9]*$/.test(configured)) return null;
+
+  const value = Number(configured);
+  return value <= MAX_FIXTURE_BUDGET_MS ? value : null;
+}
+
+/**
+ * Whether the adapter's cache should be bypassed, because the isolated fixture policy is in force and has asked.
+ *
+ * ## Why a harness needs this
+ *
+ * The cache is keyed by entity, title and coordinates, so a *second* lookup of the same trip is answered entirely from
+ * memory and makes no request at all. That is exactly right in production — and it makes a cancelled refresh
+ * unobservable, because there is no in-flight request to cancel. A scenario that clicked Cancel anyway would be
+ * asserting against a run that had already finished, which is the kind of test that passes for the wrong reason.
+ *
+ * Bypassing reads rather than writes, so the run still behaves normally in every other respect.
+ *
+ * ## Why it is safe
+ *
+ * The same `serverFixtureOrigin()` gate as the budget override and the media allowance: a unit-test process that opted
+ * in, or `next dev` under the browser harness with every Wikimedia endpoint redirected at one loopback origin and no
+ * deployment marker present. A served application fails on `NODE_ENV` before the variable is read, and the variable is
+ * private, so nothing compiled into a bundle can set it. The worst a mistake here could do is make a fixture run
+ * slower.
+ */
+export function fixtureCacheIsDisabled(): boolean {
+  if (serverFixtureOrigin() === null) return false;
+  return process.env.ROAMLY_WIKIMEDIA_CACHE_DISABLED === "1";
+}
+
+/**
  * Whether this URL is the fixture's own, under a permission that is currently in force.
  *
  * An exact `URL.origin` comparison — scheme, host and port in one — which is why a lookalike hostname, a different

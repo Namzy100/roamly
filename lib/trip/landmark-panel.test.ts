@@ -7,7 +7,10 @@ import {
   describeLandmarkPanel,
   type LandmarkPanelInput,
 } from "./landmark-panel";
-import type { TripIntelligenceStatus } from "./trip-intelligence-ui";
+import {
+  LANDMARK_CANCELLED_MESSAGE,
+  type TripIntelligenceStatus,
+} from "./trip-intelligence-ui";
 
 /**
  * The panel's decisions, enumerated.
@@ -18,7 +21,7 @@ import type { TripIntelligenceStatus } from "./trip-intelligence-ui";
  * button. What is left for the browser is focus, Escape, ARIA wiring and the requests themselves.
  */
 
-/** All twelve, so a sweep cannot quietly skip one. */
+/** All thirteen, so a sweep cannot quietly skip one. */
 const ALL_STATUSES: TripIntelligenceStatus[] = [
   "idle",
   "no-eligible-landmarks",
@@ -30,6 +33,7 @@ const ALL_STATUSES: TripIntelligenceStatus[] = [
   "complete",
   "partial",
   "empty",
+  "cancelled",
   "failed",
   "conflict",
 ];
@@ -623,6 +627,91 @@ describe("every state produces something renderable", () => {
       expect(sentence).not.toMatch(/https?:\/\//);
       expect(sentence).not.toMatch(/[a-z]+_[a-z]+/);
       expect(sentence.toLowerCase()).not.toContain("token");
+    }
+  });
+});
+
+/**
+ * What the panel shows after somebody presses Cancel.
+ *
+ * The state exists because resetting to `idle` made a cancelled lookup indistinguishable from one that never ran, so
+ * the properties worth pinning are the ones that distinguish it: the reassurance is present, it is not dressed as a
+ * fault, the button that stopped it is gone, and the action can be started again.
+ */
+describe("a cancelled lookup", () => {
+  it("says nothing was saved, as a notice rather than a problem", () => {
+    const panel = describeLandmarkPanel(
+      input({ status: "cancelled", message: LANDMARK_CANCELLED_MESSAGE }),
+    );
+
+    expect(panel.outcome).toEqual({
+      tone: "notice",
+      message: LANDMARK_CANCELLED_MESSAGE,
+    });
+    /* The two facts a person needs, and no apology for using a button that exists to be used. */
+    expect(panel.outcome?.message).toContain("Nothing was saved");
+    expect(panel.outcome?.message).toContain("unchanged");
+  });
+
+  it("withdraws Cancel and makes the action pressable again", () => {
+    const panel = describeLandmarkPanel(
+      input({ status: "cancelled", message: LANDMARK_CANCELLED_MESSAGE }),
+    );
+
+    /* There is nothing left to cancel. */
+    expect(panel.cancel).toBeNull();
+    expect(panel.primary.busy).toBe(false);
+    expect(panel.primary.disabledReason).toBeNull();
+  });
+
+  /** A refresh that was cancelled still has something to clear, because the old sidecar was never touched. */
+  it("still offers Clear when the trip already had context", () => {
+    const panel = describeLandmarkPanel(
+      input({
+        status: "cancelled",
+        message: LANDMARK_CANCELLED_MESSAGE,
+        hasIntelligence: true,
+      }),
+    );
+
+    expect(panel.primary.action).toBe("refresh");
+    expect(panel.clear).toEqual({
+      label: "Clear landmark context",
+      disabled: false,
+    });
+  });
+
+  /**
+   * No progress bar.
+   *
+   * The hook drops the counts on cancel, and this pins the panel's half: a bar left at "3 of 12" would suggest a
+   * quarter of the work survived, when the whole run was discarded.
+   */
+  it("renders no progress when the run was discarded", () => {
+    const panel = describeLandmarkPanel(
+      input({ status: "cancelled", message: LANDMARK_CANCELLED_MESSAGE }),
+    );
+
+    expect(panel.progress).toBeNull();
+  });
+
+  it("names no provider, host, status code or internal stop code", () => {
+    const message = LANDMARK_CANCELLED_MESSAGE.toLowerCase();
+
+    for (const forbidden of [
+      "abort",
+      "wikidata",
+      "wikimedia",
+      "commons",
+      "http",
+      "fetch",
+      "signal",
+      "error",
+      "failed",
+      "budget_exhausted",
+      "call-limit",
+    ]) {
+      expect(message, forbidden).not.toContain(forbidden);
     }
   });
 });

@@ -263,6 +263,50 @@ describe("the loop is bounded", () => {
     expect(result.matched).toBe(3);
   });
 
+  /**
+   * The ceiling reached with places still outstanding.
+   *
+   * The test above hits the same ceiling but happens to answer every place on the way, so it settles as `complete` and
+   * says nothing about the cap's own outcome. This is the case a traveller actually sees when a trip is too slow to
+   * finish: three calls spent, one place still unknown, and a result that must not claim otherwise.
+   */
+  it("reports the cap without claiming completion, keeping the unresolved count", async () => {
+    const places = [MUSEUM, GALLERY, HOTEL, FIXTURE_PLACES.restaurantOne];
+    /* One place of progress per call, and a fourth place that is never reached. */
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response([matched(MUSEUM)], { code: "budget_exhausted", attempted: 1 }),
+      )
+      .mockResolvedValueOnce(
+        response([matched(GALLERY)], { code: "budget_exhausted", attempted: 1 }),
+      )
+      .mockResolvedValue(
+        response([matched(HOTEL)], { code: "budget_exhausted", attempted: 1 }),
+      );
+
+    const result = await runEnrichmentWorkflow({
+      places,
+      expectedRevision: 3,
+      requestId: "req-workflow-0001",
+      post: post as unknown as EnrichmentPost,
+    });
+
+    expect(result.calls).toBe(MAX_ENRICHMENT_CALLS);
+    /* Not `complete`: three calls were spent and a place is still unanswered. */
+    expect(result.stop).toBe("call-limit");
+    expect(result.matched).toBe(3);
+    expect(result.unresolved).toBe(1);
+    expect(result.unresolvedPlaceIds).toEqual([
+      FIXTURE_PLACES.restaurantOne.placeId,
+    ]);
+
+    /* Each call carried only what was still outstanding, and the last still had a place left over. */
+    expect(requestsFrom(post).map((request) => request.places.length)).toEqual([
+      4, 3, 2,
+    ]);
+  });
+
   it("stops immediately when a call makes no progress", async () => {
     const post = vi
       .fn()
@@ -324,6 +368,49 @@ describe("abort and failure", () => {
     expect(post).toHaveBeenCalledTimes(1);
     expect(result.stop).toBe("aborted");
     expect(result.matched).toBe(1);
+  });
+
+  /**
+   * An abort that arrives as a rejection from inside the call, which is what `fetch` actually does.
+   *
+   * The test above aborts the signal and lets the call resolve, so it exercises the between-calls check. This exercises
+   * the other branch: `post` rejects with an `AbortError`, and the workflow must read that as the traveller changing
+   * their mind rather than as a transport failure. The two are told apart by `stop`, and only `aborted` suppresses the
+   * save — so misclassifying an abort as `failed` would write a sidecar for a run somebody cancelled.
+   */
+  it("treats an AbortError thrown by the call itself as an abort, not a failure", async () => {
+    const controller = new AbortController();
+    const post = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+
+    const result = await run(post, controller.signal);
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(result.stop).toBe("aborted");
+    expect(result.matched).toBe(0);
+    /* Nothing was answered, so every place is still outstanding and none is claimed as checked. */
+    expect(result.unresolved).toBe(PLACES.length);
+    expect(result.outcomes).toEqual([]);
+  });
+
+  /**
+   * The same rejection without the signal ever being aborted is still an abort.
+   *
+   * A caller can pass no signal at all and have its transport abort for its own reasons — a navigation, a closed tab.
+   * `isAbort(error)` is what covers that, independently of `signal.aborted`, and without this test the two halves of
+   * that condition could not be distinguished.
+   */
+  it("recognises an AbortError even when no signal was given", async () => {
+    const post = vi.fn().mockRejectedValue(
+      new DOMException("The operation was aborted.", "AbortError"),
+    );
+
+    const result = await run(post);
+
+    expect(result.stop).toBe("aborted");
+    expect(result.calls).toBe(1);
   });
 
   it("treats a response that fails the contract as a failure, keeping earlier answers", async () => {

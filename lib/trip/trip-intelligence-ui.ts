@@ -68,10 +68,33 @@ export type TripIntelligenceStatus =
   | "partial"
   /** Finished with nothing to write. The trip is untouched — this never erases what was already there. */
   | "empty"
+  /**
+   * The traveller pressed Cancel. Nothing was saved, whatever the earlier calls had already answered.
+   *
+   * Distinct from `idle` on purpose. Resetting to `idle` left the panel looking exactly as it had before the run began,
+   * so a cancelled lookup was indistinguishable from one that never happened — and somebody who had just watched a
+   * progress bar was given no confirmation that stopping it had cost them nothing. It is also distinct from `failed`:
+   * nothing went wrong, and a problem tone would be an apology for doing as asked.
+   */
+  | "cancelled"
   /** Something went wrong and nothing was saved. */
   | "failed"
   /** The trip changed elsewhere before the write, so nothing was saved. */
   | "conflict";
+
+/**
+ * What a traveller is told after cancelling a lookup.
+ *
+ * Two facts and no apology. "Nothing was saved" is the one that matters — the run may have answered several places
+ * before it was stopped, and this is the only place a person is told those answers were discarded rather than half
+ * written. "Your trip is unchanged" states the same guarantee from the other side, because "nothing was saved" alone
+ * could still be read as "something was removed".
+ *
+ * Deliberately not phrased as a failure. Cancelling is a thing the button is *for*, and copy that treated it as a fault
+ * would make the safe choice feel like a mistake.
+ */
+export const LANDMARK_CANCELLED_MESSAGE =
+  "Cancelled. Nothing was saved — your trip is unchanged.";
 
 /** The phases during which a request or a write is in progress. */
 const IN_FLIGHT: ReadonlySet<TripIntelligenceStatus> =
