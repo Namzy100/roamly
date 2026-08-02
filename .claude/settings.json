@@ -20,7 +20,7 @@
       "Bash(git clean -fdx:*)",
       "Bash(npm publish:*)",
       "Bash(npm audit fix --force:*)",
-      "Bash(curl:*|*sh)",
+      "Bash(curl:*)",
       "Bash(sudo:*)",
       "Read(./.env.local)",
       "Read(./.env)",
